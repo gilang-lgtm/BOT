@@ -127,7 +127,7 @@ Tugasmu:
   if (!res.ok) throw new Error(`Gemini API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!rawText) throw new Error("Respon Gemini kosong");
+  if (!rawText) throw new Error("Respon kosong");
   return JSON.parse(rawText);
 }
 
@@ -411,7 +411,7 @@ async function onMessage(m) {
     await sendTelegram("🗑️ <b>Jurnal berhasil di-reset!</b> Data lama telah diarsipkan di server.", { parse_mode: "HTML" });
 
   } else if (cmd === "/analisa") {
-    await sendTelegram("🔍 Sedang menarik data candle terkini & meminta pandangan Gemini...");
+    await sendTelegram("🔍 Sedang menarik data candle terkini...");
     try {
       const job = jobs[0];
       const bars = await fetchClosedBars(job.spec, job.tf, process.env);
@@ -438,14 +438,14 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon dari Gemini.";
+      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon.";
       await sendTelegram(`🧠 <b>Analisa Market ${job.pair} (${tfName(job.tf)})</b>\n\n${html(reply)}`, { parse_mode: "HTML" });
     } catch (err) {
       await sendTelegram(`❌ Gagal melakukan analisa: ${html(err.message)}`, { parse_mode: "HTML" });
     }
 
   } else if (cmd === "/tes_sinyal") {
-    await sendTelegram("⏳ Menarik data live & meminta analisa Gemini...");
+    await sendTelegram("⏳ Menarik data live...");
     const job = jobs[0];
     const bars = await fetchClosedBars(job.spec, job.tf, process.env);
     const last = bars[bars.length - 1];
@@ -555,12 +555,12 @@ function scheduleNext(tf) {
 }
 
 if (process.argv.includes("--test")) {
-  await sendTelegram("✅ Tes Gemini Trading Bot: koneksi Telegram berhasil.");
+  await sendTelegram("✅ Tes Trading Bot: koneksi Telegram berhasil.");
   process.exit(0);
 }
 
 const tfs = [...new Set(jobs.map((j) => j.tf))];
-console.log(`Gemini Trading Bot aktif (mode ${executor.name}).`);
+console.log(`Trading Bot aktif (mode ${executor.name}).`);
 await sendTelegram(`✅ <b>Bot Aktif</b> (Mode: ${executor.name.toUpperCase()})`, { parse_mode: "HTML" }).catch(() => {});
 
 pollTelegram();

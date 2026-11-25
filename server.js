@@ -345,12 +345,27 @@ async function onMessage(m) {
       `🤖 <b>Gemini Trading Bot Aktif</b>\n` +
       `Mode Eksekusi: <b>${executor.name.toUpperCase()}</b>\n` +
       `Pair: ${[...new Set(jobs.map((j) => j.pair))].join(", ")}\n` +
-      `Perintah: /rekap`,
+      `Perintah: /rekap | /tes_sinyal`,
       { parse_mode: "HTML" }
     );
+  } else if (cmd === "/tes_sinyal") {
+    await sendTelegram("⏳ Menarik data live XAU/USD & meminta analisa Gemini...");
+    const job = jobs[0];
+    const bars = await fetchClosedBars(job.spec, job.tf, process.env);
+    const last = bars[bars.length - 1];
+    const dummySignal = {
+      id: `TEST-${Date.now()}`,
+      time: last.t,
+      side: "BUY",
+      entry: last.c,
+      sl: Number((last.c - 3.0).toFixed(2)),
+      tp1: Number((last.c + 4.5).toFixed(2)),
+      rr1: 1.5,
+      reason: "Simulasi pullback EMA20 pada tren naik M5",
+    };
+    await handleSignal(job, dummySignal, bars);
   }
 }
-
 async function pollTelegram() {
   let offset = 0;
   for (;;) {

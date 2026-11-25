@@ -352,15 +352,15 @@ async function onMessage(m) {
     await sendTelegram(
       `🤖 <b>Trading Bot Menu</b>\n\n` +
       `📊 <b>Analisa & Sinyal</b>\n` +
-      `/analisa — Minta Gemini analisa market M5 saat ini\n` +
-      `/tes_sinyal — Simulasi kirim kartu sinyal\n\n` +
+      `/analisa — analisa market M5 saat ini\n` +
+      `/tes_sinyal — kirim kartu sinyal\n\n` +
       `🛡️ <b>Kontrol & Risiko</b>\n` +
       `/pause — Hentikan sementara sinyal baru (mis. saat news)\n` +
       `/resume — Aktifkan kembali sinyal otomatis\n` +
-      `/status — Cek status bot, posisi open & sisa kuota AI\n\n` +
+      `/status — Cek status bot, posisi open & sisa kuota\n\n` +
       `📒 <b>Jurnal & Evaluasi</b>\n` +
       `/open — Lihat daftar posisi yang masih berjalan\n` +
-      `/rekap — Ringkasan win rate & total R\n` +
+      `/rekap — Ringkasan win rate & performa jurnal\n` +
       `/reset_jurnal — Arsipkan jurnal lama & mulai baru`,
       { parse_mode: "HTML" }
     );

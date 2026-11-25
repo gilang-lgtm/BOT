@@ -350,7 +350,7 @@ async function onMessage(m) {
 
   if (cmd === "/start" || cmd === "/help") {
     await sendTelegram(
-      `🤖 <b>Gemini Trading Bot Menu</b>\n\n` +
+      `🤖 <b>Trading Bot Menu</b>\n\n` +
       `📊 <b>Analisa & Sinyal</b>\n` +
       `/analisa — Minta Gemini analisa market M5 saat ini\n` +
       `/tes_sinyal — Simulasi kirim kartu sinyal\n\n` +

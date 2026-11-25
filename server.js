@@ -21,6 +21,8 @@ const {
   STATE_FILE = "./state.json",
 } = process.env;
 
+let isPaused = false;
+
 for (const k of ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]) {
   if (!process.env[k]) { console.error(`Env ${k} belum diisi`); process.exit(1); }
 }
@@ -179,9 +181,15 @@ function recapText() {
 
 // ---------- Penanganan Sinyal Baru ----------
 async function handleSignal(job, e, bars) {
+  if (isPaused) {
+    console.log(`[PAUSED] Sinyal ${e.id} dilewati karena bot sedang di-pause.`);
+    return;
+  }
+  if (readJournal().some((r) => r.id === e.id)) return;
   if (readJournal().some((r) => r.id === e.id)) return;
   const tf = tfName(job.tf);
   const stale = Date.now() - (e.time + job.tf * 60_000) > ttlMs;
+  
   if (stale) return; // Abaikan sinyal lama saat bot baru nyala
 
   let side = e.side;
@@ -338,18 +346,106 @@ async function onCallback(cb) {
 
 async function onMessage(m) {
   if (String(m.chat?.id) !== String(TELEGRAM_CHAT_ID)) return;
-  const cmd = String(m.text ?? "").trim().split(/[ @]/)[0];
-  if (cmd === "/rekap") await sendTelegram(recapText());
-  else if (cmd === "/start" || cmd === "/help") {
+  const cmd = String(m.text ?? "").trim().split(/[ @]/)[0].toLowerCase();
+
+  if (cmd === "/start" || cmd === "/help") {
     await sendTelegram(
-      `🤖 <b>Gemini Trading Bot Aktif</b>\n` +
-      `Mode Eksekusi: <b>${executor.name.toUpperCase()}</b>\n` +
-      `Pair: ${[...new Set(jobs.map((j) => j.pair))].join(", ")}\n` +
-      `Perintah: /rekap | /tes_sinyal`,
+      `🤖 <b>Gemini Trading Bot Menu</b>\n\n` +
+      `📊 <b>Analisa & Sinyal</b>\n` +
+      `/analisa — Minta Gemini analisa market M5 saat ini\n` +
+      `/tes_sinyal — Simulasi kirim kartu sinyal\n\n` +
+      `🛡️ <b>Kontrol & Risiko</b>\n` +
+      `/pause — Hentikan sementara sinyal baru (mis. saat news)\n` +
+      `/resume — Aktifkan kembali sinyal otomatis\n` +
+      `/status — Cek status bot, posisi open & sisa kuota AI\n\n` +
+      `📒 <b>Jurnal & Evaluasi</b>\n` +
+      `/open — Lihat daftar posisi yang masih berjalan\n` +
+      `/rekap — Ringkasan win rate & total R\n` +
+      `/reset_jurnal — Arsipkan jurnal lama & mulai baru`,
       { parse_mode: "HTML" }
     );
+
+  } else if (cmd === "/pause") {
+    isPaused = true;
+    await sendTelegram("⏸️ <b>Bot di-PAUSE.</b> Sinyal baru tidak akan dikirim sampai Anda mengetik /resume.", { parse_mode: "HTML" });
+
+  } else if (cmd === "/resume") {
+    isPaused = false;
+    await sendTelegram("▶️ <b>Bot AKTIF kembali.</b> Pemantauan sinyal otomatis dilanjutkan.", { parse_mode: "HTML" });
+
+  } else if (cmd === "/status") {
+    const rows = readJournal();
+    const openCount = rows.filter((r) => r.status === "OPEN").length;
+    const wib = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
+    await sendTelegram(
+      `📡 <b>Status Bot (${wib} WIB)</b>\n` +
+      `• Kondisi: <b>${isPaused ? "⏸️ PAUSED" : "🟢 AKTIF"}</b>\n` +
+      `• Mode Eksekusi: <b>${executor.name.toUpperCase()}</b>\n` +
+      `• Model AI: <code>${GEMINI_MODEL}</code>\n` +
+      `• Kuota AI Hari Ini: <b>${dayCount} / ${MAX_PER_DAY}</b> request\n` +
+      `• Sinyal Open: <b>${openCount}</b>`,
+      { parse_mode: "HTML" }
+    );
+
+  } else if (cmd === "/open") {
+    const openRows = readJournal().filter((r) => r.status === "OPEN");
+    if (!openRows.length) {
+      await sendTelegram("📭 Tidak ada posisi/sinyal yang berstatus OPEN saat ini.");
+      return;
+    }
+    const list = openRows.map((r, i) =>
+      `${i + 1}. <b>${r.side} ${r.pair}</b> (${r.tf}) [${r.aksi}]\n` +
+      `   Entry: ${r.entry} | SL: ${r.sl} | TP: ${r.tp1}`
+    ).join("\n\n");
+    await sendTelegram(`📂 <b>Daftar Sinyal OPEN (${openRows.length}):</b>\n\n${list}`, { parse_mode: "HTML" });
+
+  } else if (cmd === "/rekap") {
+    await sendTelegram(recapText());
+
+  } else if (cmd === "/reset_jurnal") {
+    if (fs.existsSync(JOURNAL_FILE)) {
+      const backupName = JOURNAL_FILE.replace(/\.csv$/, "") + `-arsip-${Date.now()}.csv`;
+      fs.renameSync(JOURNAL_FILE, backupName);
+    }
+    writeJournal([]);
+    await sendTelegram("🗑️ <b>Jurnal berhasil di-reset!</b> Data lama telah diarsipkan di server.", { parse_mode: "HTML" });
+
+  } else if (cmd === "/analisa") {
+    await sendTelegram("🔍 Sedang menarik data candle terkini & meminta pandangan Gemini...");
+    try {
+      const job = jobs[0];
+      const bars = await fetchClosedBars(job.spec, job.tf, process.env);
+      const last = bars[bars.length - 1];
+      const summary = bars.slice(-20).map((b) =>
+        `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`
+      ).join("\n");
+
+      const prompt = `Berikan analisa scalping singkat (maksimal 5 poin) untuk ${job.pair} Timeframe ${tfName(job.tf)} berdasarkan 20 candle terakhir (UTC) berikut.
+Sebutkan: 1) Arah tren jangka pendek, 2) Level Support & Resistance terdekat, 3) Skenario entry terbaik saat ini, dan 4) Peringatan risiko. Gunakan bahasa Indonesia yang padat dan jelas tanpa tabel.
+Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+      let res;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3 } }),
+        });
+        if (res.status !== 503) break;
+        await sleep(3000);
+      }
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon dari Gemini.";
+      await sendTelegram(`🧠 <b>Analisa Market ${job.pair} (${tfName(job.tf)})</b>\n\n${html(reply)}`, { parse_mode: "HTML" });
+    } catch (err) {
+      await sendTelegram(`❌ Gagal melakukan analisa: ${html(err.message)}`, { parse_mode: "HTML" });
+    }
+
   } else if (cmd === "/tes_sinyal") {
-    await sendTelegram("⏳ Menarik data live XAU/USD & meminta analisa Gemini...");
+    await sendTelegram("⏳ Menarik data live & meminta analisa Gemini...");
     const job = jobs[0];
     const bars = await fetchClosedBars(job.spec, job.tf, process.env);
     const last = bars[bars.length - 1];
@@ -366,6 +462,7 @@ async function onMessage(m) {
     await handleSignal(job, dummySignal, bars);
   }
 }
+
 async function pollTelegram() {
   let offset = 0;
   for (;;) {

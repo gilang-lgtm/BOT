@@ -14,7 +14,7 @@ const {
   EXECUTION = "paper",
   SIGNAL_TTL_MIN = "10",
   GEMINI_API_KEY,
-  GEMINI_MODEL = "gemini-2.5-flash",
+  GEMINI_MODEL = "gemini-3.1-flash-lite-preview",
   AI_FILTER = "true",
   MAX_PER_DAY = "50",
   JOURNAL_FILE = "./journal.csv",

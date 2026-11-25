@@ -1,0 +1,16 @@
+{
+  "name": "smc-agent-gratis",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server.js",
+    "test": "node test.js",
+    "test-telegram": "node --env-file=.env server.js --test",
+    "backtest": "node --env-file=.env backtest.js"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}

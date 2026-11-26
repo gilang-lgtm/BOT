@@ -260,11 +260,11 @@ async function handleSignal(job, e, bars) {
         trendLabel = ai.trend_label || trendLabel;
         reason = ai.reason || reason;
       } else {
-        aiAlert = `⚠️ <b>ALERT GEMINI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
+        aiAlert = `⚠️ <b>ALERT AI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
         console.log(`[Gemini Alert] Sinyal ${e.id} tetap dikirim dengan peringatan: ${ai.reason}`);
       }
     } catch (err) {
-      console.error("Gemini gagal, fallback ke sinyal teknikal murni:", err.message);
+      console.error("gagal, fallback ke sinyal teknikal murni:", err.message);
       aiAlert = `⚠️ <i>Catatan: Analisa AI sedang sibuk, sinyal murni berdasarkan indikator teknikal.</i>`;
     }
   }
@@ -412,9 +412,9 @@ async function onMessage(m) {
 
   if (cmd === "/start" || cmd === "/help") {
     await sendTelegram(
-      `🤖 <b>Gemini Trading Bot Menu</b>\n\n` +
+      `🤖 <b> Trading Bot Menu</b>\n\n` +
         `📊 <b>Analisa & Sinyal</b>\n` +
-        `/analisa — Minta Gemini analisa market M5 saat ini\n` +
+        `/analisa — Minta AI analisa market M5 saat ini\n` +
         `/tes_sinyal — Simulasi kirim kartu sinyal\n\n` +
         `🛡️ <b>Kontrol & Risiko</b>\n` +
         `/pause — Hentikan sementara sinyal baru (mis. saat news)\n` +
@@ -473,7 +473,7 @@ async function onMessage(m) {
       parse_mode: "HTML",
     });
   } else if (cmd === "/analisa") {
-    await sendTelegram("🔍 Sedang menarik data candle terkini & meminta pandangan Gemini...");
+    await sendTelegram("🔍 Sedang menarik data candle terkini & meminta pandangan Agent...");
     try {
       const job = jobs[0];
       const bars = await fetchClosedBars(job.spec, job.tf, process.env);
@@ -501,7 +501,7 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon dari Gemini.";
+      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon.";
       await sendTelegram(`🧠 <b>Analisa Market ${job.pair} (${tfName(job.tf)})</b>\n\n${html(reply)}`, {
         parse_mode: "HTML",
       });
@@ -509,7 +509,7 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
       await sendTelegram(`❌ Gagal melakukan analisa: ${html(err.message)}`, { parse_mode: "HTML" });
     }
   } else if (cmd === "/tes_sinyal") {
-    await sendTelegram("⏳ Menarik data live & meminta analisa Gemini...");
+    await sendTelegram("⏳ Menarik data live...");
     try {
       const job = jobs[0];
       const bars = await fetchClosedBars(job.spec, job.tf, process.env);
@@ -650,7 +650,7 @@ function scheduleNext(tf) {
 
 // ---------- Main ----------
 if (process.argv.includes("--test")) {
-  await sendTelegram("✅ Tes Gemini Trading Bot: koneksi Telegram berhasil.");
+  await sendTelegram("✅ Tes Trading Bot: koneksi Telegram berhasil.");
   process.exit(0);
 }
 
@@ -663,7 +663,7 @@ http
   .listen(Number(PORT), () => console.log(`Keep-alive server berjalan di port ${PORT}`));
 
 const tfs = [...new Set(jobs.map((j) => j.tf))];
-console.log(`Gemini Trading Bot aktif (mode ${executor.name}).`);
+console.log(`Trading Bot aktif (mode ${executor.name}).`);
 await sendTelegram(`✅ <b>Bot Aktif</b> (Mode: ${executor.name.toUpperCase()})`, { parse_mode: "HTML" }).catch(() => {});
 
 pollTelegram();

@@ -266,12 +266,12 @@ async function handleSignal(job, e, bars) {
   let rrText = `1:${e.rr1}`;
   let trendLabel = side === "BUY" ? "Trend bullish" : "Trend bearish";
   let reason = e.reason;
-  let aiAlert = "";
+  let evalBlock = "";
 
   if (AI_FILTER === "true" && aiBudgetOk()) {
     try {
       const ai = await analyzeWithGemini(job, e, bars);
-      if (ai.approve) {
+      if (ai.setup_score >= 60) {
         side = ai.side || side;
         entry = ai.entry || entry;
         sl = ai.stop_loss || sl;
@@ -280,12 +280,28 @@ async function handleSignal(job, e, bars) {
         trendLabel = ai.trend_label || trendLabel;
         reason = ai.reason || reason;
       } else {
-        aiAlert = `⚠️ <b>ALERT AI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
-        console.log(`[Gemini Alert] Sinyal ${e.id} tetap dikirim dengan peringatan: ${ai.reason}`);
+        reason = ai.reason || reason;
       }
+
+      const badgeIcon = ai.setup_score >= 80 ? "🟢" : ai.setup_score >= 60 ? "🟡" : "🔴";
+      const evalRows = [
+        ["Setup score", `${ai.setup_score}/100`],
+        ["Trend alignment", ai.trend_alignment],
+        ["Pullback quality", ai.pullback_quality],
+        ["Volatility", ai.volatility],
+        ["News risk", ai.news_risk],
+      ];
+      const evalPre = evalRows.map(([k, v]) => k.padEnd(18) + String(v).padStart(10)).join("\n");
+
+      evalBlock = [
+        "",
+        `<b>AI SETUP EVALUATION</b>`,
+        `${badgeIcon} <code>[${html(ai.approval_badge)}]</code>`,
+        `<pre>${html(evalPre)}</pre>`,
+      ].join("\n");
     } catch (err) {
-      console.error("gagal, fallback ke sinyal teknikal murni:", err.message);
-      aiAlert = `⚠️ <i>Catatan: Analisa AI sedang sibuk, sinyal murni berdasarkan indikator teknikal.</i>`;
+      console.error("Gemini gagal, fallback ke sinyal teknikal murni:", err.message);
+      evalBlock = `\n⚠️ <i>AI Evaluation sedang sibuk (menggunakan parameter teknikal murni).</i>`;
     }
   }
 
@@ -307,7 +323,7 @@ async function handleSignal(job, e, bars) {
     `<pre>${html(pre)}</pre>`,
     `${isBuy ? "🟢" : "🔴"} <b>${html(trendLabel)}</b>`,
     `<i>${html(reason)}</i>`,
-    aiAlert ? `\n${aiAlert}` : null,
+    evalBlock || null,
     "",
     "<b>Konfirmasi transaksi:</b>",
   ]
@@ -344,12 +360,11 @@ async function handleSignal(job, e, bars) {
     hasil_r: "",
     aksi: "MENUNGGU",
     msg_id: sent?.message_id ?? "",
-    catatan: aiAlert ? `[ALERT AI] ${reason}` : reason,
+    catatan: reason,
   });
   writeJournal(rows);
   console.log("Sinyal terkirim:", e.id);
 }
-
 // ---------- Hasil Sinyal ----------
 async function handleResult(e) {
   const row = updateRow(e.id, (r) => {

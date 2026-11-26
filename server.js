@@ -186,11 +186,9 @@ async function handleSignal(job, e, bars) {
     return;
   }
   if (readJournal().some((r) => r.id === e.id)) return;
-  if (readJournal().some((r) => r.id === e.id)) return;
   const tf = tfName(job.tf);
   const stale = Date.now() - (e.time + job.tf * 60_000) > ttlMs;
-  
-  if (stale) return; // Abaikan sinyal lama saat bot baru nyala
+  if (stale) return;
 
   let side = e.side;
   let entry = e.entry;
@@ -199,30 +197,33 @@ async function handleSignal(job, e, bars) {
   let rrText = `1:${e.rr1}`;
   let trendLabel = side === "BUY" ? "Trend bullish" : "Trend bearish";
   let reason = e.reason;
+  let aiAlert = ""; // Menyimpan peringatan jika Gemini kurang setuju
 
-  // Validasi dan penyempurnaan oleh Gemini API
+  // Analisa oleh Gemini API (tetap kirim sinyal meski approve: false, tapi beri alert)
   if (AI_FILTER === "true" && aiBudgetOk()) {
     try {
       const ai = await analyzeWithGemini(job, e, bars);
-      if (!ai.approve) {
-        console.log(`[Gemini Filter] Sinyal ${e.id} ditolak AI: ${ai.reason}`);
-        return;
+      if (ai.approve) {
+        side = ai.side || side;
+        entry = ai.entry || entry;
+        sl = ai.stop_loss || sl;
+        tp = ai.take_profit || tp;
+        rrText = ai.risk_reward || rrText;
+        trendLabel = ai.trend_label || trendLabel;
+        reason = ai.reason || reason;
+      } else {
+        // Sinyal tetap lanjut dikirim, tetapi disisipkan alert peringatan AI
+        aiAlert = `⚠️ <b>ALERT GEMINI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
+        console.log(`[Gemini Alert] Sinyal ${e.id} tetap dikirim dengan peringatan: ${ai.reason}`);
       }
-      side = ai.side || side;
-      entry = ai.entry || entry;
-      sl = ai.stop_loss || sl;
-      tp = ai.take_profit || tp;
-      rrText = ai.risk_reward || rrText;
-      trendLabel = ai.trend_label || trendLabel;
-      reason = ai.reason || reason;
     } catch (err) {
       console.error("Gemini gagal, fallback ke sinyal teknikal murni:", err.message);
+      aiAlert = `⚠️ <i>Catatan: Analisa AI sedang sibuk, sinyal murni berdasarkan indikator teknikal.</i>`;
     }
   }
 
   const isBuy = side === "BUY";
 
-  // Format pesan menyerupai tampilan pada foto referensi Anda
   const tableRows = [
     ["Parameter", "Harga"],
     ["─────────────────────────", ""],
@@ -240,11 +241,11 @@ async function handleSignal(job, e, bars) {
     `<pre>${html(pre)}</pre>`,
     `${isBuy ? "🟢" : "🔴"} <b>${html(trendLabel)}</b>`,
     `<i>${html(reason)}</i>`,
+    aiAlert ? `\n${aiAlert}` : null,
     "",
     "<b>Konfirmasi transaksi:</b>",
-  ].join("\n");
+  ].filter((l) => l !== null).join("\n");
 
-  // 3 Tombol Interaktif: BUY | SELL | SKIP
   const sent = await sendTelegram(text, {
     parse_mode: "HTML",
     reply_markup: {
@@ -275,12 +276,11 @@ async function handleSignal(job, e, bars) {
     hasil_r: "",
     aksi: "MENUNGGU",
     msg_id: sent?.message_id ?? "",
-    catatan: reason,
+    catatan: aiAlert ? `[ALERT AI] ${reason}` : reason,
   });
   writeJournal(rows);
-  console.log("Sinyal Gemini terkirim:", e.id);
+  console.log("Sinyal terkirim:", e.id);
 }
-
 // ---------- Hasil Sinyal ----------
 async function handleResult(e) {
   const row = updateRow(e.id, (r) => {

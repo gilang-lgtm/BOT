@@ -1,15 +1,3 @@
-// Strategi scalping sederhana (ikut tren + pullback), cocok untuk M5.
-//
-// BUY : EMA20 di atas EMA50 (tren naik, jarak cukup lebar), harga close di atas EMA50,
-//       dalam 4 candle terakhir harga sempat menyentuh EMA20 (pullback), lalu candle ini
-//       close kembali di atas EMA20 dan berwarna naik (konfirmasi).
-// SELL: kebalikannya.
-// Entry = close candle sinyal. SL = low/high 5 candle terakhir +/- buffer ATR. TP = 1,5 x jarak SL.
-// Satu sinyal aktif per pair, ada jeda (cooldown) antar sinyal.
-//
-// Fungsi murni: terima candle yang sudah close (terlama -> terbaru), kembalikan event
-// { type: "signal" | "result", ... } dengan bentuk sama seperti engine.js (SMC).
-
 export const SCALP_DEFAULTS = {
   fast: 20,
   slow: 50,
@@ -63,7 +51,6 @@ export function runScalp(bars, cfg = {}) {
   let act = null, lastSig = -1e9;
 
   for (let i = 0; i < n; i++) {
-    // --- pelacak hasil (SL dicek dulu = konservatif)
     if (act && i > act.bar) {
       const hitSl = act.side === 1 ? L[i] <= act.sl : H[i] >= act.sl;
       const hitTp = act.side === 1 ? H[i] >= act.tp : L[i] <= act.tp;

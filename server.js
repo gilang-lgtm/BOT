@@ -465,6 +465,7 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
 
 async function pollTelegram() {
   let offset = 0;
+  const startTime = Date.now();
   for (;;) {
     try {
       const updates = await tg("getUpdates", { offset, timeout: 30, allowed_updates: ["callback_query", "message"] });
@@ -476,12 +477,16 @@ async function pollTelegram() {
         } catch (err) { console.error("Error update Telegram:", err.message); }
       }
     } catch (err) {
+      // Abaikan log 409 pada 90 detik pertama saat container lama sedang dimatikan hosting
+      if (err.message.includes("409") && Date.now() - startTime < 90_000) {
+        await sleep(5000);
+        continue;
+      }
       console.error("Polling Telegram gagal:", err.message);
       await sleep(5000);
     }
   }
 }
-
 async function sweepExpired() {
   const now = Date.now();
   const expired = readJournal().filter((r) => r.aksi === "MENUNGGU" && now - Number(r.ts) > ttlMs);

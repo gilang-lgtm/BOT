@@ -115,8 +115,10 @@ async function analyzeWithGemini(job, signal, recentBars) {
     .map((b) => `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`)
     .join("\n");
 
+  const wibTime = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
+
   const prompt = `Kamu adalah analis trading institusional & scalping profesional.
-Evaluasi kandidat sinyal berikut berdasarkan price action 15 candle terakhir:
+Evaluasi kandidat sinyal berikut berdasarkan price action 15 candle terakhir dan waktu sesi pasar saat ini (${wibTime} WIB):
 Pair: ${job.pair} | Timeframe: ${tfName(job.tf)} | Strategi: ${job.label}
 Kandidat Arah: ${signal.side}
 Entry awal: ${signal.entry} | SL awal: ${signal.sl} | TP awal: ${signal.tp1}
@@ -126,9 +128,18 @@ Alasan teknikal awal: ${signal.reason}
 ${candlesSummary}
 
 Tugasmu:
-1. Tentukan apakah setup ini valid dan memiliki probabilitas tinggi (approve: true) atau rawan fakeout/sideways (approve: false).
-2. Jika approve: true, kamu boleh menyempurnakan harga entry, stop_loss, dan take_profit agar pas di struktur support/resistance terdekat dengan Risk Reward minimal 1:1.5.
-3. Tulis label tren singkat (contoh: "Trend bullish" atau "Trend bearish") dan alasan singkat 1 kalimat bahasa Indonesia.`;
+1. Hitung skor kelayakan setup dari 0 sampai 100 (setup_score).
+2. Tentukan badge status approval:
+   - "STRONG APPROVAL" (jika score >= 80)
+   - "CONDITIONAL APPROVAL" (jika score 60 - 79)
+   - "HIGH RISK / CAUTION" (jika score < 60)
+3. Evaluasi 4 parameter berikut secara singkat (1-2 kata bahasa Inggris seperti standar terminal trading):
+   - trend_alignment: "Valid", "Strong", atau "Weak"
+   - pullback_quality: "Optimal", "Good", atau "Shallow"
+   - volatility: "Normal", "High", atau "Low"
+   - news_risk: "Low", "Moderate", atau "High" (pertimbangkan jam rilis sesi Eropa/AS jika malam WIB)
+4. Jika score >= 60, kamu boleh menyempurnakan harga entry, stop_loss, dan take_profit dengan RR minimal 1:1.5.
+5. Tulis trend_label singkat ("Trend bullish" / "Trend bearish") dan reason 1 kalimat bahasa Indonesia.`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
   const payloadBody = {
@@ -140,6 +151,12 @@ Tugasmu:
         type: "OBJECT",
         properties: {
           approve: { type: "BOOLEAN" },
+          approval_badge: { type: "STRING" },
+          setup_score: { type: "INTEGER" },
+          trend_alignment: { type: "STRING" },
+          pullback_quality: { type: "STRING" },
+          volatility: { type: "STRING" },
+          news_risk: { type: "STRING" },
           side: { type: "STRING", enum: ["BUY", "SELL"] },
           entry: { type: "NUMBER" },
           stop_loss: { type: "NUMBER" },
@@ -148,7 +165,11 @@ Tugasmu:
           trend_label: { type: "STRING" },
           reason: { type: "STRING" },
         },
-        required: ["approve", "side", "entry", "stop_loss", "take_profit", "risk_reward", "trend_label", "reason"],
+        required: [
+          "approve", "approval_badge", "setup_score", "trend_alignment",
+          "pullback_quality", "volatility", "news_risk", "side",
+          "entry", "stop_loss", "take_profit", "risk_reward", "trend_label", "reason"
+        ],
       },
     },
   };
@@ -170,7 +191,6 @@ Tugasmu:
   if (!rawText) throw new Error("Respon Gemini kosong");
   return JSON.parse(rawText);
 }
-
 // ---------- Jurnal CSV ----------
 const COLS = [
   "id", "waktu", "ts", "strategi", "pair", "tf", "side",

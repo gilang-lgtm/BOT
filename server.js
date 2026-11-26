@@ -2,6 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { runEngine } from "./engine.js";
 import { runScalp } from "./scalp.js";
+import { runHybrid } from "./hybrid.js";
 import { fetchClosedBars, labelOf } from "./data.js";
 import { makeExecutor } from "./executor.js";
 
@@ -9,7 +10,7 @@ const {
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
   PAIRS = "twelvedata:XAU/USD",
-  STRATEGIES = "scalp",
+  STRATEGIES = "hybrid",
   SMC_TF = "15",
   SCALP_TF = "5",
   EXECUTION = "paper",
@@ -43,8 +44,9 @@ try {
 }
 
 const STRATS = {
-  smc:   { label: "SMC",            tf: Number(SMC_TF),   run: runEngine, hasZones: true },
-  scalp: { label: "FOREX SCALPING", tf: Number(SCALP_TF), run: runScalp,  hasZones: false },
+  smc:    { label: "SMC",              tf: Number(SMC_TF),   run: runEngine, hasZones: true },
+  scalp:  { label: "FOREX SCALPING",   tf: Number(SCALP_TF), run: runScalp,  hasZones: false },
+  hybrid: { label: "HYBRID LIQUIDITY", tf: Number(SCALP_TF), run: runHybrid, hasZones: false },
 };
 const tfName = (m) => (m === 60 ? "H1" : `M${m}`);
 const ttlMs = Number(SIGNAL_TTL_MIN) * 60_000;
@@ -53,7 +55,7 @@ const jobs = [];
 for (const spec of PAIRS.split(",").map((s) => s.trim()).filter(Boolean)) {
   for (const key of STRATEGIES.split(",").map((s) => s.trim()).filter(Boolean)) {
     if (!STRATS[key]) {
-      console.error(`Strategi tidak dikenal: "${key}"`);
+      console.error(`Strategi tidak dikenal: "${key}" (pakai hybrid / scalp / smc)`);
       process.exit(1);
     }
     jobs.push({ spec, key, pair: labelOf(spec), ...STRATS[key] });
@@ -108,67 +110,248 @@ function aiBudgetOk() {
   return dayCount < Number(MAX_PER_DAY);
 }
 
+// Kalkulasi indikator untuk dikirim sebagai evidence nyata ke Gemini
+function calcIndicatorsForAI(bars) {
+  const closes = bars.map((b) => b.c);
+  const ema = (arr, p) => {
+    const k = 2 / (p + 1);
+    let cur = arr.slice(0, p).reduce((a, b) => a + b, 0) / p;
+    for (let i = p; i < arr.length; i++) cur = arr[i] * k + cur * (1 - k);
+    return cur;
+  };
+  let atrSum = 0;
+  for (let i = bars.length - 14; i < bars.length; i++) {
+    const tr = Math.max(
+      bars[i].h - bars[i].l,
+      Math.abs(bars[i].h - bars[i - 1].c),
+      Math.abs(bars[i].l - bars[i - 1].c)
+    );
+    atrSum += tr;
+  }
+  return {
+    ema20: ema(closes, 20).toFixed(2),
+    ema50: ema(closes, 50).toFixed(2),
+    atr14: (atrSum / 14).toFixed(2),
+  };
+}
+
 async function analyzeWithGemini(job, signal, recentBars) {
   dayCount++;
+  const wibTime = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
+  const ind = calcIndicatorsForAI(recentBars);
+
   const candlesSummary = recentBars
-    .slice(-15)
+    .slice(-30)
     .map((b) => `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`)
     .join("\n");
 
-  const wibTime = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
+  const prompt = `
+Kamu adalah Institutional Price Action & Liquidity Setup Validator untuk ${job.pair}.
+Fokus analisismu adalah Hybrid EMA20 + ICT/SMC Liquidity Model.
+Kamu bertindak sebagai evaluator yang skeptis, objektif, disiplin, dan berbasis evidence.
 
-  const prompt = `Kamu adalah analis trading institusional & scalping profesional.
-Evaluasi kandidat sinyal berikut berdasarkan price action 15 candle terakhir dan waktu sesi pasar saat ini (${wibTime} WIB):
-Pair: ${job.pair} | Timeframe: ${tfName(job.tf)} | Strategi: ${job.label}
-Kandidat Arah: ${signal.side}
-Entry awal: ${signal.entry} | SL awal: ${signal.sl} | TP awal: ${signal.tp1}
-Alasan teknikal awal: ${signal.reason}
+TUJUAN:
+Evaluasi kandidat signal dari Strategy Engine.
+Jangan mencari alasan untuk membenarkan kandidat.
+Cari evidence yang mendukung DAN evidence yang membantah signal.
+Prioritaskan kualitas setup, struktur market, liquidity, risk, dan validitas entry.
+Jangan memaksakan BUY atau SELL jika data belum cukup.
 
-15 Candle Terakhir (UTC):
+MARKET CONTEXT:
+Current time: ${wibTime} WIB
+Pair: ${job.pair}
+Timeframe: ${tfName(job.tf)}
+Strategy: ${job.label}
+Candidate direction: ${signal.side}
+Initial entry: ${signal.entry}
+Initial SL: ${signal.sl}
+Initial TP1: ${signal.tp1}
+Initial technical reason: ${signal.reason}
+
+TECHNICAL INDICATORS (Calculated):
+EMA 20: ${ind.ema20}
+EMA 50: ${ind.ema50}
+ATR (14): ${ind.atr14}
+
+PRICE DATA:
+30 candles terakhir (UTC):
 ${candlesSummary}
 
-Tugasmu:
-1. Hitung skor kelayakan setup dari 0 sampai 100 (setup_score).
-2. Tentukan badge status approval:
-   - "STRONG APPROVAL" (jika score >= 80)
-   - "CONDITIONAL APPROVAL" (jika score 60 - 79)
-   - "HIGH RISK / CAUTION" (jika score < 60)
-3. Evaluasi 4 parameter berikut secara singkat (1-2 kata bahasa Inggris seperti standar terminal trading):
-   - trend_alignment: "Valid", "Strong", atau "Weak"
-   - pullback_quality: "Optimal", "Good", atau "Shallow"
-   - volatility: "Normal", "High", atau "Low"
-   - news_risk: "Low", "Moderate", atau "High" (pertimbangkan jam rilis sesi Eropa/AS jika malam WIB)
-4. Jika score >= 60, kamu boleh menyempurnakan harga entry, stop_loss, dan take_profit dengan RR minimal 1:1.5.
-5. Tulis trend_label singkat ("Trend bullish" / "Trend bearish") dan reason 1 kalimat bahasa Indonesia.`;
+EVALUATION FRAMEWORK:
+
+1. TREND & MARKET CONTEXT
+- Evaluasi trend berdasarkan data yang tersedia.
+- Periksa alignment EMA20/EMA50 yang tersedia di atas.
+- Bedakan trending, ranging, choppy, dan unclear market.
+- Jangan menyimpulkan HTF bias jika data HTF tidak tersedia.
+- Jika timeframe tinggi tidak tersedia, tandai HTF bias sebagai UNKNOWN.
+
+2. LIQUIDITY ANALYSIS
+Cari evidence yang relevan:
+- Equal Highs (EQH) / Equal Lows (EQL)
+- Swing High / Swing Low
+- Buy-side liquidity (BSL)
+- Sell-side liquidity (SSL)
+- Liquidity sweep
+- Breakout genuine vs sweep/reclaim
+Liquidity sweep hanya boleh dinyatakan CONFIRMED jika terdapat level liquidity yang dapat diidentifikasi, harga menembus level tersebut, dan evidence penolakan/reclaim sesuai model setup.
+Wick panjang saja bukan bukti liquidity sweep.
+
+3. DISPLACEMENT & MARKET STRUCTURE
+Evaluasi:
+- Bullish / Bearish displacement
+- Body candle relatif terhadap candle sebelumnya dan ATR (14)
+- Momentum dan impuls
+- MSS / CHoCH
+- BOS
+- Internal structure break
+Jangan menyebut MSS/BOS confirmed jika swing atau structure level tidak dapat diidentifikasi dari data.
+Candle besar saja tidak otomatis berarti displacement valid.
+Sweep tanpa displacement dan structure confirmation bukan entry confirmation.
+
+4. ENTRY LOCATION & POI
+Evaluasi jika tersedia:
+- Fair Value Gap (FVG)
+- Order Block (OB)
+- Premium / Discount
+- Retracement quality
+- EMA20 confluence
+- Distance from entry
+- Apakah harga sudah terlalu jauh / entry chase
+Jangan mengarang FVG, OB, premium/discount, atau level liquidity yang tidak dapat diverifikasi dari data.
+
+5. CANDIDATE VALIDATION
+Periksa apakah setup sesuai arah kandidat:
+- BUY harus didukung bullish evidence.
+- SELL harus didukung bearish evidence.
+- Bedakan REVERSAL dan CONTINUATION.
+- Jika model setup tidak jelas, klasifikasikan UNKNOWN.
+- Periksa apakah entry masih valid atau sudah terlambat.
+- Periksa apakah SL berada pada invalidation yang masuk akal.
+- Evaluasi apakah RR awal layak dan tidak terhalang struktur terdekat.
+
+6. RISK & MARKET CONDITIONS
+Evaluasi:
+- ATR / volatility dari data yang tersedia.
+- Volatility: Low / Normal / High.
+- News risk jika data kalender tersedia.
+- Spread jika data spread tersedia.
+- Session context berdasarkan waktu WIB saat ini.
+- Potensi entry terlalu dekat dengan target liquidity.
+- Apakah risk terlalu besar dibanding kondisi market.
+Jangan mengklaim news aman jika kalender berita tidak disediakan.
+Jangan mengklaim spread normal jika spread tidak tersedia.
+
+7. CONTRADICTION CHECK
+Cari alasan untuk menolak signal:
+- Kandidat BUY tetapi bearish displacement kuat.
+- Kandidat SELL tetapi bullish displacement kuat.
+- Sweep belum dikonfirmasi.
+- Tidak ada MSS / structure break.
+- Market ranging/choppy.
+- Entry sudah terlambat.
+- SL tidak logis.
+- RR tidak layak.
+- Data tidak cukup.
+- Signal bertentangan dengan HTF context yang tersedia.
+
+8. SCORING
+Beri setup score 0-100 berdasarkan evidence:
+- Trend alignment: 0-20
+- Liquidity quality: 0-20
+- Structure confirmation: 0-20
+- Displacement / momentum: 0-15
+- Entry location / POI: 0-15
+- Volatility & session quality: 0-10
+Score adalah SETUP QUALITY SCORE, bukan win probability.
+Jangan memberikan skor tinggi hanya karena wick, reclaim, atau EMA alignment.
+Evidence yang tidak tersedia harus mengurangi confidence dan tidak boleh dianggap valid.
+Faktor yang berasal dari peristiwa/candle sama jangan dihitung berulang seolah-olah independen.
+
+9. DECISION RULES
+APPROVE: Score >= 75, arah didukung, entry belum terlambat, tidak ada critical contradiction, dan hard requirements strategi terpenuhi.
+CAUTION: Score 60-74, atau terdapat evidence campuran, confirmation belum lengkap, context terbatas, atau risk warning.
+REJECT: Score < 60, terdapat critical contradiction, setup invalid, entry terlambat, atau risk tidak layak.
+WAIT_CONFIRMATION: Liquidity event/setup awal terlihat tetapi displacement, MSS, atau trigger entry belum terkonfirmasi.
+INSUFFICIENT_DATA: Data tidak cukup untuk memvalidasi setup secara objektif.
+
+10. FOUR REQUIRED PARAMETERS
+trend_alignment: "Strong" | "Valid" | "Weak" | "Unknown"
+pullback_quality: "Optimal" | "Good" | "Shallow" | "Late" | "Invalid" | "Unknown"
+volatility: "Low" | "Normal" | "High" | "Unknown"
+news_risk: "Low" | "Moderate" | "High" | "Unknown"
+
+11. AI ROLE LIMITATION
+- Kamu adalah validator, bukan market predictor.
+- Jangan mengarang data harga atau level teknikal.
+- Jangan mengubah entry, SL, TP berdasarkan intuisi.
+- Jangan menyatakan institusi pasti sedang membeli atau menjual.
+- Jangan mengklaim bebas stop hunt.
+- Jangan memberikan probabilitas kemenangan tanpa model statistik terkalibrasi.
+- Jika data tidak cukup, katakan secara eksplisit.
+- Technical engine tetap menjadi sumber utama perhitungan level.
+
+12. OUTPUT FORMAT
+Balas hanya JSON valid sesuai schema.
+`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
   const payloadBody = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
-      temperature: 0.2,
+      temperature: 0.15,
       responseMimeType: "application/json",
       responseSchema: {
         type: "OBJECT",
         properties: {
-          approve: { type: "BOOLEAN" },
-          approval_badge: { type: "STRING" },
-          setup_score: { type: "INTEGER" },
-          trend_alignment: { type: "STRING" },
-          pullback_quality: { type: "STRING" },
-          volatility: { type: "STRING" },
-          news_risk: { type: "STRING" },
-          side: { type: "STRING", enum: ["BUY", "SELL"] },
-          entry: { type: "NUMBER" },
-          stop_loss: { type: "NUMBER" },
-          take_profit: { type: "NUMBER" },
-          risk_reward: { type: "STRING" },
-          trend_label: { type: "STRING" },
-          reason: { type: "STRING" },
+          decision: {
+            type: "STRING",
+            enum: ["APPROVE", "CAUTION", "REJECT", "WAIT_CONFIRMATION", "INSUFFICIENT_DATA"],
+          },
+          score: { type: "INTEGER" },
+          setup_type: { type: "STRING", enum: ["REVERSAL", "CONTINUATION", "UNKNOWN"] },
+          trend_alignment: { type: "STRING", enum: ["Strong", "Valid", "Weak", "Unknown"] },
+          pullback_quality: {
+            type: "STRING",
+            enum: ["Optimal", "Good", "Shallow", "Late", "Invalid", "Unknown"],
+          },
+          volatility: { type: "STRING", enum: ["Low", "Normal", "High", "Unknown"] },
+          news_risk: { type: "STRING", enum: ["Low", "Moderate", "High", "Unknown"] },
+          liquidity_sweep: {
+            type: "STRING",
+            enum: ["Confirmed", "Possible", "Not_detected", "Unknown"],
+          },
+          displacement: { type: "STRING", enum: ["Bullish", "Bearish", "Weak", "None", "Unknown"] },
+          structure_confirmation: {
+            type: "STRING",
+            enum: ["Bullish_MSS", "Bearish_MSS", "BOS", "None", "Unknown"],
+          },
+          poi_quality: { type: "STRING", enum: ["Strong", "Valid", "Weak", "None", "Unknown"] },
+          entry_status: { type: "STRING", enum: ["Valid", "Early", "Late", "Invalid", "Unknown"] },
+          rr_valid: { type: "BOOLEAN" },
+          reasons_for: { type: "ARRAY", items: { type: "STRING" } },
+          reasons_against: { type: "ARRAY", items: { type: "STRING" } },
+          warnings: { type: "ARRAY", items: { type: "STRING" } },
+          summary: { type: "STRING" },
         },
         required: [
-          "approve", "approval_badge", "setup_score", "trend_alignment",
-          "pullback_quality", "volatility", "news_risk", "side",
-          "entry", "stop_loss", "take_profit", "risk_reward", "trend_label", "reason"
+          "decision",
+          "score",
+          "setup_type",
+          "trend_alignment",
+          "pullback_quality",
+          "volatility",
+          "news_risk",
+          "liquidity_sweep",
+          "displacement",
+          "structure_confirmation",
+          "poi_quality",
+          "entry_status",
+          "rr_valid",
+          "reasons_for",
+          "reasons_against",
+          "warnings",
+          "summary",
         ],
       },
     },
@@ -191,6 +374,7 @@ Tugasmu:
   if (!rawText) throw new Error("Respon Gemini kosong");
   return JSON.parse(rawText);
 }
+
 // ---------- Jurnal CSV ----------
 const COLS = [
   "id", "waktu", "ts", "strategi", "pair", "tf", "side",
@@ -259,45 +443,49 @@ async function handleSignal(job, e, bars) {
   const stale = Date.now() - (e.time + job.tf * 60_000) > ttlMs;
   if (stale) return;
 
-  let side = e.side;
-  let entry = e.entry;
-  let sl = e.sl;
-  let tp = e.tp1;
-  let rrText = `1:${e.rr1}`;
-  let trendLabel = side === "BUY" ? "Trend bullish" : "Trend bearish";
+  const side = e.side;
+  const entry = e.entry;
+  const sl = e.sl;
+  const tp = e.tp1;
+  const rrText = `1:${e.rr1}`;
+  const trendLabel = side === "BUY" ? "Trend bullish" : "Trend bearish";
   let reason = e.reason;
   let evalBlock = "";
+  let aiDecisionTag = "";
 
   if (AI_FILTER === "true" && aiBudgetOk()) {
     try {
       const ai = await analyzeWithGemini(job, e, bars);
-      if (ai.setup_score >= 60) {
-        side = ai.side || side;
-        entry = ai.entry || entry;
-        sl = ai.stop_loss || sl;
-        tp = ai.take_profit || tp;
-        rrText = ai.risk_reward || rrText;
-        trendLabel = ai.trend_label || trendLabel;
-        reason = ai.reason || reason;
-      } else {
-        reason = ai.reason || reason;
-      }
+      reason = ai.summary || reason;
+      aiDecisionTag = `[${ai.decision} ${ai.score}/100] `;
 
-      const badgeIcon = ai.setup_score >= 80 ? "🟢" : ai.setup_score >= 60 ? "🟡" : "🔴";
+      const badgeIcon =
+        ai.decision === "APPROVE" ? "🟢" :
+        ai.decision === "CAUTION" ? "🟡" : "🔴";
+
       const evalRows = [
-        ["Setup score", `${ai.setup_score}/100`],
+        ["Setup score", `${ai.score}/100`],
         ["Trend alignment", ai.trend_alignment],
         ["Pullback quality", ai.pullback_quality],
+        ["Liquidity sweep", ai.liquidity_sweep],
+        ["Structure", ai.structure_confirmation],
         ["Volatility", ai.volatility],
         ["News risk", ai.news_risk],
       ];
-      const evalPre = evalRows.map(([k, v]) => k.padEnd(18) + String(v).padStart(10)).join("\n");
+      const evalPre = evalRows.map(([k, v]) => k.padEnd(18) + String(v).padStart(12)).join("\n");
+
+      const contraNote = ai.reasons_against?.length
+        ? `\n⚠️ <i>Contra: ${html(ai.reasons_against[0])}</i>`
+        : "";
+      const warnNote = ai.warnings?.length
+        ? `\n🚨 <i>Warning: ${html(ai.warnings[0])}</i>`
+        : "";
 
       evalBlock = [
         "",
         `<b>AI SETUP EVALUATION</b>`,
-        `${badgeIcon} <code>[${html(ai.approval_badge)}]</code>`,
-        `<pre>${html(evalPre)}</pre>`,
+        `${badgeIcon} <code>[${html(ai.decision)}]</code> • <i>${html(ai.setup_type)}</i>`,
+        `<pre>${html(evalPre)}</pre>${contraNote}${warnNote}`,
       ].join("\n");
     } catch (err) {
       console.error("Gemini gagal, fallback ke sinyal teknikal murni:", err.message);
@@ -360,11 +548,12 @@ async function handleSignal(job, e, bars) {
     hasil_r: "",
     aksi: "MENUNGGU",
     msg_id: sent?.message_id ?? "",
-    catatan: reason,
+    catatan: `${aiDecisionTag}${reason}`,
   });
   writeJournal(rows);
   console.log("Sinyal terkirim:", e.id);
 }
+
 // ---------- Hasil Sinyal ----------
 async function handleResult(e) {
   const row = updateRow(e.id, (r) => {
@@ -447,9 +636,9 @@ async function onMessage(m) {
 
   if (cmd === "/start" || cmd === "/help") {
     await sendTelegram(
-      `🤖 <b> Trading Bot Menu</b>\n\n` +
+      `🤖 <b>Gemini Trading Bot Menu</b>\n\n` +
         `📊 <b>Analisa & Sinyal</b>\n` +
-        `/analisa — Minta AI analisa market M5 saat ini\n` +
+        `/analisa — Minta Gemini analisa market M5 saat ini\n` +
         `/tes_sinyal — Simulasi kirim kartu sinyal\n\n` +
         `🛡️ <b>Kontrol & Risiko</b>\n` +
         `/pause — Hentikan sementara sinyal baru (mis. saat news)\n` +
@@ -476,6 +665,7 @@ async function onMessage(m) {
     await sendTelegram(
       `📡 <b>Status Bot (${wib} WIB)</b>\n` +
         `• Kondisi: <b>${isPaused ? "⏸️ PAUSED" : "🟢 AKTIF"}</b>\n` +
+        `• Strategi: <b>${jobs.map((j) => j.label).join(", ")}</b>\n` +
         `• Mode Eksekusi: <b>${executor.name.toUpperCase()}</b>\n` +
         `• Model AI: <code>${GEMINI_MODEL}</code>\n` +
         `• Kuota AI Hari Ini: <b>${dayCount} / ${MAX_PER_DAY}</b> request\n` +
@@ -508,19 +698,20 @@ async function onMessage(m) {
       parse_mode: "HTML",
     });
   } else if (cmd === "/analisa") {
-    await sendTelegram("🔍 Sedang menarik data candle terkini & meminta pandangan Agent...");
+    await sendTelegram("🔍 Sedang menarik data candle terkini & meminta pandangan Gemini...");
     try {
       const job = jobs[0];
       const bars = await fetchClosedBars(job.spec, job.tf, process.env);
       const last = bars[bars.length - 1];
+      const ind = calcIndicatorsForAI(bars);
       const summary = bars
-        .slice(-20)
+        .slice(-25)
         .map((b) => `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`)
         .join("\n");
 
-      const prompt = `Berikan analisa scalping singkat (maksimal 5 poin) untuk ${job.pair} Timeframe ${tfName(job.tf)} berdasarkan 20 candle terakhir (UTC) berikut.
-Sebutkan: 1) Arah tren jangka pendek, 2) Level Support & Resistance terdekat, 3) Skenario entry terbaik saat ini, dan 4) Peringatan risiko. Gunakan bahasa Indonesia yang padat dan jelas tanpa tabel.
-Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
+      const prompt = `Berikan analisa scalping singkat (maksimal 5 poin) untuk ${job.pair} Timeframe ${tfName(job.tf)} menggunakan model Hybrid EMA20 + Institutional Liquidity berdasarkan 25 candle terakhir (UTC) berikut.
+Indikator: EMA20 = ${ind.ema20}, EMA50 = ${ind.ema50}, ATR14 = ${ind.atr14}, Harga terakhir = ${last.c}.
+Sebutkan: 1) Arah tren & posisi terhadap EMA20, 2) Area Liquidity Sweep (BSL/SSL) terdekat, 3) Struktur MSS/BOS terkini, dan 4) Skenario entry & peringatan risiko. Gunakan bahasa Indonesia yang padat dan objektif tanpa tabel.\n\nData Candle:\n${summary}`;
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
       let res;
@@ -528,7 +719,7 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
         res = await fetch(url, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3 } }),
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.25 } }),
         });
         if (res.status !== 503) break;
         await sleep(3000);
@@ -536,7 +727,7 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon.";
+      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon dari Gemini.";
       await sendTelegram(`🧠 <b>Analisa Market ${job.pair} (${tfName(job.tf)})</b>\n\n${html(reply)}`, {
         parse_mode: "HTML",
       });
@@ -544,7 +735,7 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
       await sendTelegram(`❌ Gagal melakukan analisa: ${html(err.message)}`, { parse_mode: "HTML" });
     }
   } else if (cmd === "/tes_sinyal") {
-    await sendTelegram("⏳ Menarik data live...");
+    await sendTelegram("⏳ Menarik data live & meminta evaluasi Gemini...");
     try {
       const job = jobs[0];
       const bars = await fetchClosedBars(job.spec, job.tf, process.env);
@@ -555,9 +746,9 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
         side: "BUY",
         entry: last.c,
         sl: Number((last.c - 3.0).toFixed(2)),
-        tp1: Number((last.c + 4.5).toFixed(2)),
-        rr1: 1.5,
-        reason: "Simulasi pullback EMA20 pada tren naik M5",
+        tp1: Number((last.c + 6.0).toFixed(2)),
+        rr1: 2.0,
+        reason: "Simulasi Bullish Liquidity Sweep + Displacement MSS di atas EMA20",
       };
       await handleSignal(job, dummySignal, bars);
     } catch (err) {
@@ -685,11 +876,10 @@ function scheduleNext(tf) {
 
 // ---------- Main ----------
 if (process.argv.includes("--test")) {
-  await sendTelegram("✅ Tes Trading Bot: koneksi Telegram berhasil.");
+  await sendTelegram("✅ Tes Gemini Trading Bot: koneksi Telegram berhasil.");
   process.exit(0);
 }
 
-// Keep-alive HTTP server agar container hosting tidak sleep/mati
 http
   .createServer((req, res) => {
     res.writeHead(200, { "content-type": "text/plain" });
@@ -698,8 +888,8 @@ http
   .listen(Number(PORT), () => console.log(`Keep-alive server berjalan di port ${PORT}`));
 
 const tfs = [...new Set(jobs.map((j) => j.tf))];
-console.log(`Trading Bot aktif (mode ${executor.name}).`);
-await sendTelegram(`✅ <b>Bot Aktif</b> (Mode: ${executor.name.toUpperCase()})`, { parse_mode: "HTML" }).catch(() => {});
+console.log(`Gemini Trading Bot aktif (mode ${executor.name}). Strategi: ${jobs.map((j) => j.label).join(", ")}`);
+await sendTelegram(`✅ <b>Bot Aktif</b> (Strategi: ${jobs.map((j) => j.label).join(", ")})`, { parse_mode: "HTML" }).catch(() => {});
 
 pollTelegram();
 setInterval(() => sweepExpired().catch(() => {}), 60_000);

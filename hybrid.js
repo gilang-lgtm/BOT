@@ -1,15 +1,15 @@
 // Strategi Hybrid: EMA 20 Trend Filter + Institutional Liquidity (Sweep + Displacement + MSS)
 export const HYBRID_DEFAULTS = {
   emaPeriod: 20,
-  swingLookback: 20,
-  sweepWindow: 5,
-  dispAtrMult: 1.3,
+  swingLookback: 15,      // Diturunkan dari 20 agar swing likuiditas jangka pendek cepat terbaca
+  sweepWindow: 6,         // Dinaikkan dari 5 agar jendela pantulan setelah sweep lebih luas
+  dispAtrMult: 0.85,      // Diturunkan dari 1.3 agar dorongan momentum normal M5 tetap lolos
   slBufAtr: 0.15,
-  minRiskAtr: 0.4,
-  maxRiskAtr: 3.5,
-  rr: 2.0,
-  cooldown: 4,
-  holdMax: 48,
+  minRiskAtr: 0.3,        // Diturunkan dari 0.4 agar SL scalping ketat tetap valid
+  maxRiskAtr: 4.0,
+  rr: 1.5,                // Diturunkan dari 2.0 ke 1.5 agar TP lebih cepat tercapai & slot sinyal cepat terbuka
+  cooldown: 2,            // Diturunkan dari 4 (jeda antar sinyal cukup 10 menit)
+  holdMax: 24,            // Diturunkan dari 48 (maksimal 2 jam pantau per sinyal)
 };
 
 function ema(values, period) {

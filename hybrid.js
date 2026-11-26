@@ -1,17 +1,17 @@
-// Strategi Hybrid: EMA 20 Trend Filter + Institutional Liquidity (Sweep + Displacement + MSS)
-// Versi teroptimasi (lebih responsif untuk XAU/USD M5)
-
+// Strategi Hybrid: EMA 20 + Institutional Liquidity (Sweep + Displacement + MSS) + Trailing Stop
 export const HYBRID_DEFAULTS = {
   emaPeriod: 20,
-  swingLookback: 15,      // Jendela mencari Swing High/Low likuiditas jangka pendek
-  sweepWindow: 6,         // Jendela pantulan maksimal N candle setelah liquidity sweep
-  dispAtrMult: 0.85,      // Minimal ukuran body candle displacement (x ATR14)
-  slBufAtr: 0.15,         // Buffer SL di luar ekor sweep (x ATR14)
-  minRiskAtr: 0.3,        // Filter SL terlalu sempit (x ATR14)
-  maxRiskAtr: 4.0,        // Filter SL terlalu lebar (x ATR14)
-  rr: 1.5,                // Risk Reward 1:1.5 agar TP lebih realistis & cepat tercapai di M5
-  cooldown: 2,            // Jeda minimal antar sinyal (2 bar M5 = 10 menit)
-  holdMax: 24,            // Maksimal durasi pantau hasil (24 bar M5 = 2 jam)
+  swingLookback: 10,      // Swing likuiditas jangka pendek lebih cepat terbaca
+  sweepWindow: 7,         // Jendela pantulan lebih lebar setelah sweep
+  dispAtrMult: 0.45,      // Lebih sensitif menangkap dorongan momentum M5
+  slBufAtr: 0.15,         // Buffer SL di luar ekor sweep
+  minRiskAtr: 0.2,        // SL ketat scalping M5 tetap valid
+  maxRiskAtr: 4.5,
+  rr: 1.5,                // Target TP 1:1.5
+  trailStartR: 0.6,       // Geser SL ke Break-Even saat profit menyentuh +0.6R
+  trailStepR: 0.5,        // Jarak trailing SL di belakang harga puncak (0.5R)
+  cooldown: 0,            // Tanpa jeda paksa antar sinyal
+  holdMax: 24,            // Maksimal pantau 24 bar M5 (2 jam)
 };
 
 function ema(values, period) {
@@ -21,10 +21,7 @@ function ema(values, period) {
   for (let i = 0; i < values.length; i++) {
     if (i < period) {
       sum += values[i];
-      if (i === period - 1) {
-        cur = sum / period;
-        out[i] = cur;
-      }
+      if (i === period - 1) { cur = sum / period; out[i] = cur; }
     } else {
       cur = values[i] * k + cur * (1 - k);
       out[i] = cur;
@@ -34,20 +31,12 @@ function ema(values, period) {
 }
 
 function atr14(H, L, C) {
-  const n = H.length;
-  const out = new Array(n).fill(NaN);
+  const n = H.length, out = new Array(n).fill(NaN);
   let sum = 0, cur = NaN;
   for (let i = 0; i < n; i++) {
-    const tr =
-      i === 0
-        ? H[i] - L[i]
-        : Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1]));
-    if (i < 14) {
-      sum += tr;
-      if (i === 13) cur = sum / 14;
-    } else {
-      cur = (cur * 13 + tr) / 14;
-    }
+    const tr = i === 0 ? H[i] - L[i] : Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1]));
+    if (i < 14) { sum += tr; if (i === 13) cur = sum / 14; }
+    else cur = (cur * 13 + tr) / 14;
     if (i >= 13) out[i] = cur;
   }
   return out;
@@ -70,15 +59,50 @@ export function runHybrid(bars, cfg = {}) {
   let lastSig = -1e9;
 
   for (let i = P.swingLookback + P.sweepWindow; i < n; i++) {
-    // 1. Pantau hasil sinyal aktif (SL dicek lebih dulu)
+    // 1. Pantau posisi aktif beserta logika Trailing Stop
     if (act && i > act.bar) {
       const hitSl = act.side === 1 ? L[i] <= act.sl : H[i] >= act.sl;
       const hitTp = act.side === 1 ? H[i] >= act.tp : L[i] <= act.tp;
-      const outcome = hitSl ? "SL" : hitTp ? "TP1" : i - act.bar > P.holdMax ? "EXPIRED" : "";
-      if (outcome) {
-        const r = outcome === "SL" ? -1 : outcome === "TP1" ? act.rr : 0;
-        events.push({ type: "result", time: bars[i].t, id: act.id, outcome, r: r2(r) });
+
+      if (hitSl) {
+        const lockedR = act.side === 1
+          ? (act.sl - act.entry) / act.risk
+          : (act.entry - act.sl) / act.risk;
+        const outcome = lockedR > 0.05 ? "TP1" : lockedR >= -0.05 ? "EXPIRED" : "SL";
+        events.push({
+          type: "result",
+          time: bars[i].t,
+          id: act.id,
+          outcome,
+          r: r2(lockedR),
+          note: lockedR >= 0 ? `Trailing Stop terkunci di ${r2(act.sl)} (${lockedR >= 0 ? "+" : ""}${r2(lockedR)}R)` : "",
+        });
         act = null;
+      } else if (hitTp) {
+        events.push({ type: "result", time: bars[i].t, id: act.id, outcome: "TP1", r: r2(act.rr), note: "Target TP penuh tercapai" });
+        act = null;
+      } else if (i - act.bar > P.holdMax) {
+        const currentR = act.side === 1 ? (C[i] - act.entry) / act.risk : (act.entry - C[i]) / act.risk;
+        const outcome = currentR > 0.1 ? "TP1" : "EXPIRED";
+        events.push({ type: "result", time: bars[i].t, id: act.id, outcome, r: r2(currentR), note: "Batas waktu maksimal" });
+        act = null;
+      } else {
+        // Update Trailing Stop jika harga bergerak menguntungkan
+        if (act.side === 1) {
+          act.peak = Math.max(act.peak, H[i]);
+          const maxR = (act.peak - act.entry) / act.risk;
+          if (maxR >= P.trailStartR) {
+            const candidateSl = Math.max(act.entry, act.peak - P.trailStepR * act.risk);
+            if (candidateSl > act.sl) act.sl = candidateSl;
+          }
+        } else {
+          act.peak = Math.min(act.peak, L[i]);
+          const maxR = (act.entry - act.peak) / act.risk;
+          if (maxR >= P.trailStartR) {
+            const candidateSl = Math.min(act.entry, act.peak + P.trailStepR * act.risk);
+            if (candidateSl < act.sl) act.sl = candidateSl;
+          }
+        }
       }
     }
 
@@ -88,16 +112,16 @@ export function runHybrid(bars, cfg = {}) {
     const emaNow = e20[i];
     if ([a, emaNow].some(Number.isNaN)) continue;
 
-    // 2. Cek Displacement pada candle saat ini (i)
+    // 2. Cek Displacement (lebih sensitif agar sering menangkap momentum M5)
     const body = Math.abs(C[i] - O[i]);
     const range = H[i] - L[i];
-    const isDisplacement = body >= P.dispAtrMult * a && range > 0 && body / range >= 0.5;
+    const isDisplacement = body >= P.dispAtrMult * a && range > 0 && body / range >= 0.35;
     if (!isDisplacement) continue;
 
     const bullCandle = C[i] > O[i];
     const bearCandle = C[i] < O[i];
 
-    // 3. Skenario BUY: Sweep Low -> Displacement + MSS tembus High -> Close/Reclaim di atas EMA20
+    // 3. Skenario BUY
     if (bullCandle && C[i] > emaNow) {
       const sweepStart = i - P.sweepWindow;
       const poolStart = sweepStart - P.swingLookback;
@@ -122,7 +146,7 @@ export function runHybrid(bars, cfg = {}) {
           if (risk >= P.minRiskAtr * a && risk <= P.maxRiskAtr * a) {
             const tp = entry + risk * P.rr;
             const id = `{PAIR}-${bars[i].t}`;
-            act = { side: 1, sl, tp, rr: P.rr, bar: i, id };
+            act = { side: 1, entry, sl, tp, risk, peak: H[i], rr: P.rr, bar: i, id };
             lastSig = i;
             events.push({
               type: "signal",
@@ -145,7 +169,7 @@ export function runHybrid(bars, cfg = {}) {
       }
     }
 
-    // 4. Skenario SELL: Sweep High -> Displacement + MSS tembus Low -> Close/Reclaim di bawah EMA20
+    // 4. Skenario SELL
     if (!act && bearCandle && C[i] < emaNow) {
       const sweepStart = i - P.sweepWindow;
       const poolStart = sweepStart - P.swingLookback;
@@ -170,7 +194,7 @@ export function runHybrid(bars, cfg = {}) {
           if (risk >= P.minRiskAtr * a && risk <= P.maxRiskAtr * a) {
             const tp = entry - risk * P.rr;
             const id = `{PAIR}-${bars[i].t}`;
-            act = { side: -1, sl, tp, rr: P.rr, bar: i, id };
+            act = { side: -1, entry, sl, tp, risk, peak: L[i], rr: P.rr, bar: i, id };
             lastSig = i;
             events.push({
               type: "signal",

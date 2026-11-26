@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import http from "node:http";
 import { runEngine } from "./engine.js";
 import { runScalp } from "./scalp.js";
 import { fetchClosedBars, labelOf } from "./data.js";
@@ -19,12 +20,14 @@ const {
   MAX_PER_DAY = "50",
   JOURNAL_FILE = "./journal.csv",
   STATE_FILE = "./state.json",
+  PORT = "3000",
 } = process.env;
 
-let isPaused = false;
-
 for (const k of ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]) {
-  if (!process.env[k]) { console.error(`Env ${k} belum diisi`); process.exit(1); }
+  if (!process.env[k]) {
+    console.error(`Env ${k} belum diisi`);
+    process.exit(1);
+  }
 }
 if (AI_FILTER === "true" && !GEMINI_API_KEY) {
   console.error("AI_FILTER=true membutuhkan GEMINI_API_KEY dari Google AI Studio");
@@ -32,7 +35,12 @@ if (AI_FILTER === "true" && !GEMINI_API_KEY) {
 }
 
 let executor;
-try { executor = makeExecutor(EXECUTION); } catch (e) { console.error(e.message); process.exit(1); }
+try {
+  executor = makeExecutor(EXECUTION);
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}
 
 const STRATS = {
   smc:   { label: "SMC",            tf: Number(SMC_TF),   run: runEngine, hasZones: true },
@@ -44,13 +52,22 @@ const jobs = [];
 
 for (const spec of PAIRS.split(",").map((s) => s.trim()).filter(Boolean)) {
   for (const key of STRATEGIES.split(",").map((s) => s.trim()).filter(Boolean)) {
-    if (!STRATS[key]) { console.error(`Strategi tidak dikenal: "${key}"`); process.exit(1); }
+    if (!STRATS[key]) {
+      console.error(`Strategi tidak dikenal: "${key}"`);
+      process.exit(1);
+    }
     jobs.push({ spec, key, pair: labelOf(spec), ...STRATS[key] });
   }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const fmt = (v) => (v == null || v === "" ? "-" : Number(v).toLocaleString("en-US", { minimumFractionDigits: Math.abs(v) < 20 ? 5 : 2, maximumFractionDigits: Math.abs(v) < 20 ? 5 : 2 }));
+const fmt = (v) =>
+  v == null || v === ""
+    ? "-"
+    : Number(v).toLocaleString("en-US", {
+        minimumFractionDigits: Math.abs(v) < 20 ? 5 : 2,
+        maximumFractionDigits: Math.abs(v) < 20 ? 5 : 2,
+      });
 const html = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 // ---------- Telegram API ----------
@@ -61,26 +78,42 @@ async function tg(method, body) {
     body: JSON.stringify(body),
   });
   const j = await res.json().catch(() => ({}));
-  if (!res.ok || j.ok === false) throw new Error(`Telegram ${method} ${res.status}: ${JSON.stringify(j).slice(0, 200)}`);
+  if (!res.ok || j.ok === false) {
+    throw new Error(`Telegram ${method} ${res.status}: ${JSON.stringify(j).slice(0, 200)}`);
+  }
   return j.result;
 }
-const sendTelegram = (text, extra = {}) => tg("sendMessage", { chat_id: TELEGRAM_CHAT_ID, text: text.slice(0, 3900), ...extra });
+const sendTelegram = (text, extra = {}) =>
+  tg("sendMessage", { chat_id: TELEGRAM_CHAT_ID, text: text.slice(0, 3900), ...extra });
 const clearButtons = (messageId) =>
-  messageId ? tg("editMessageReplyMarkup", { chat_id: TELEGRAM_CHAT_ID, message_id: Number(messageId), reply_markup: { inline_keyboard: [] } }).catch(() => {}) : Promise.resolve();
+  messageId
+    ? tg("editMessageReplyMarkup", {
+        chat_id: TELEGRAM_CHAT_ID,
+        message_id: Number(messageId),
+        reply_markup: { inline_keyboard: [] },
+      }).catch(() => {})
+    : Promise.resolve();
 
-// ---------- Integrasi Gemini API (Free Tier) ----------
-let dayKey = "", dayCount = 0;
+// ---------- Kontrol AI & Status Bot ----------
+let dayKey = "";
+let dayCount = 0;
+let isPaused = false;
+
 function aiBudgetOk() {
   const today = new Date().toISOString().slice(0, 10);
-  if (today !== dayKey) { dayKey = today; dayCount = 0; }
+  if (today !== dayKey) {
+    dayKey = today;
+    dayCount = 0;
+  }
   return dayCount < Number(MAX_PER_DAY);
 }
 
 async function analyzeWithGemini(job, signal, recentBars) {
   dayCount++;
-  const candlesSummary = recentBars.slice(-15).map((b) =>
-    `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`
-  ).join("\n");
+  const candlesSummary = recentBars
+    .slice(-15)
+    .map((b) => `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`)
+    .join("\n");
 
   const prompt = `Kamu adalah analis trading institusional & scalping profesional.
 Evaluasi kandidat sinyal berikut berdasarkan price action 15 candle terakhir:
@@ -98,41 +131,51 @@ Tugasmu:
 3. Tulis label tren singkat (contoh: "Trend bullish" atau "Trend bearish") dan alasan singkat 1 kalimat bahasa Indonesia.`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            approve: { type: "BOOLEAN" },
-            side: { type: "STRING", enum: ["BUY", "SELL"] },
-            entry: { type: "NUMBER" },
-            stop_loss: { type: "NUMBER" },
-            take_profit: { type: "NUMBER" },
-            risk_reward: { type: "STRING" },
-            trend_label: { type: "STRING" },
-            reason: { type: "STRING" },
-          },
-          required: ["approve", "side", "entry", "stop_loss", "take_profit", "risk_reward", "trend_label", "reason"],
+  const payloadBody = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          approve: { type: "BOOLEAN" },
+          side: { type: "STRING", enum: ["BUY", "SELL"] },
+          entry: { type: "NUMBER" },
+          stop_loss: { type: "NUMBER" },
+          take_profit: { type: "NUMBER" },
+          risk_reward: { type: "STRING" },
+          trend_label: { type: "STRING" },
+          reason: { type: "STRING" },
         },
+        required: ["approve", "side", "entry", "stop_loss", "take_profit", "risk_reward", "trend_label", "reason"],
       },
-    }),
-  });
+    },
+  };
+
+  let res;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payloadBody),
+    });
+    if (res.status !== 503) break;
+    await sleep(3000);
+  }
 
   if (!res.ok) throw new Error(`Gemini API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!rawText) throw new Error("Respon kosong");
+  if (!rawText) throw new Error("Respon Gemini kosong");
   return JSON.parse(rawText);
 }
 
 // ---------- Jurnal CSV ----------
-const COLS = ["id", "waktu", "ts", "strategi", "pair", "tf", "side", "entry", "sl", "tp1", "tp2", "rr1", "rr2", "status", "hasil_r", "aksi", "msg_id", "catatan"];
+const COLS = [
+  "id", "waktu", "ts", "strategi", "pair", "tf", "side",
+  "entry", "sl", "tp1", "tp2", "rr1", "rr2", "status", "hasil_r", "aksi", "msg_id", "catatan",
+];
 const esc = (v) => String(v ?? "").replace(/[,\r\n]+/g, " ").trim();
 
 function readJournal() {
@@ -147,10 +190,12 @@ function readJournal() {
     return Object.fromEntries(COLS.map((k, i) => [k, c[i] ?? ""]));
   });
 }
+
 function writeJournal(rows) {
   const out = [COLS.join(","), ...rows.map((r) => COLS.map((k) => esc(r[k])).join(","))].join("\n") + "\n";
   fs.writeFileSync(JOURNAL_FILE, out);
 }
+
 function updateRow(id, fn) {
   const rows = readJournal();
   const row = rows.find((r) => r.id === id);
@@ -159,16 +204,20 @@ function updateRow(id, fn) {
   writeJournal(rows);
   return row;
 }
+
 function summarize(rows) {
   const closed = rows.filter((r) => r.status === "SL" || r.status === "TP1");
   const wins = closed.filter((r) => r.status === "TP1").length;
   return {
-    closed: closed.length, wins, losses: closed.length - wins,
+    closed: closed.length,
+    wins,
+    losses: closed.length - wins,
     open: rows.filter((r) => r.status === "OPEN").length,
     winRate: closed.length ? (wins / closed.length) * 100 : 0,
     totalR: closed.reduce((s, r) => s + Number(r.hasil_r || 0), 0),
   };
 }
+
 function recapText() {
   const rows = readJournal();
   const line = (title, s) =>
@@ -197,9 +246,8 @@ async function handleSignal(job, e, bars) {
   let rrText = `1:${e.rr1}`;
   let trendLabel = side === "BUY" ? "Trend bullish" : "Trend bearish";
   let reason = e.reason;
-  let aiAlert = ""; // Menyimpan peringatan jika Gemini kurang setuju
+  let aiAlert = "";
 
-  // Analisa oleh Gemini API (tetap kirim sinyal meski approve: false, tapi beri alert)
   if (AI_FILTER === "true" && aiBudgetOk()) {
     try {
       const ai = await analyzeWithGemini(job, e, bars);
@@ -212,8 +260,7 @@ async function handleSignal(job, e, bars) {
         trendLabel = ai.trend_label || trendLabel;
         reason = ai.reason || reason;
       } else {
-        // Sinyal tetap lanjut dikirim, tetapi disisipkan alert peringatan AI
-        aiAlert = `⚠️ <b>ALERT AI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
+        aiAlert = `⚠️ <b>ALERT GEMINI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
         console.log(`[Gemini Alert] Sinyal ${e.id} tetap dikirim dengan peringatan: ${ai.reason}`);
       }
     } catch (err) {
@@ -223,7 +270,6 @@ async function handleSignal(job, e, bars) {
   }
 
   const isBuy = side === "BUY";
-
   const tableRows = [
     ["Parameter", "Harga"],
     ["─────────────────────────", ""],
@@ -244,7 +290,9 @@ async function handleSignal(job, e, bars) {
     aiAlert ? `\n${aiAlert}` : null,
     "",
     "<b>Konfirmasi transaksi:</b>",
-  ].filter((l) => l !== null).join("\n");
+  ]
+    .filter((l) => l !== null)
+    .join("\n");
 
   const sent = await sendTelegram(text, {
     parse_mode: "HTML",
@@ -281,6 +329,7 @@ async function handleSignal(job, e, bars) {
   writeJournal(rows);
   console.log("Sinyal terkirim:", e.id);
 }
+
 // ---------- Hasil Sinyal ----------
 async function handleResult(e) {
   const row = updateRow(e.id, (r) => {
@@ -300,13 +349,22 @@ async function handleResult(e) {
 // ---------- Handler Tombol BUY / SELL / SKIP ----------
 async function onCallback(cb) {
   if (String(cb.message?.chat?.id) !== String(TELEGRAM_CHAT_ID)) return;
-  const answer = (text, alert = false) => tg("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert }).catch(() => {});
+  const answer = (text, alert = false) =>
+    tg("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert }).catch(() => {});
   const [action, id] = String(cb.data ?? "").split("|");
   const msgId = cb.message.message_id;
   const row = readJournal().find((r) => r.id === id);
 
-  if (!row) { await answer("Sinyal tidak ditemukan", true); await clearButtons(msgId); return; }
-  if (row.aksi !== "MENUNGGU") { await answer(`Sudah diproses (${row.aksi})`); await clearButtons(msgId); return; }
+  if (!row) {
+    await answer("Sinyal tidak ditemukan", true);
+    await clearButtons(msgId);
+    return;
+  }
+  if (row.aksi !== "MENUNGGU") {
+    await answer(`Sudah diproses (${row.aksi})`);
+    await clearButtons(msgId);
+    return;
+  }
 
   if (action === "skip") {
     updateRow(id, (r) => { r.aksi = "SKIP"; });
@@ -325,17 +383,20 @@ async function onCallback(cb) {
     return;
   }
 
-  const chosenSide = action.toUpperCase(); // "BUY" atau "SELL"
+  const chosenSide = action.toUpperCase();
 
   try {
     await answer(`Mengirim order ${chosenSide} ke broker...`);
     const res = await executor.open(row, chosenSide);
-    updateRow(id, (r) => { r.aksi = "DIAMBIL"; r.side = chosenSide; });
+    updateRow(id, (r) => {
+      r.aksi = "DIAMBIL";
+      r.side = chosenSide;
+    });
     await clearButtons(msgId);
     await sendTelegram(
       `✅ <b>ORDER TERKIRIM (${chosenSide} ${row.pair})</b>\n` +
-      `${html(res.note)}\n` +
-      `Entry: ${row.entry} | SL: ${row.sl} | TP: ${row.tp1}`,
+        `${html(res.note)}\n` +
+        `Entry: ${row.entry} | SL: ${row.sl} | TP: ${row.tp1}`,
       { parse_mode: "HTML" }
     );
   } catch (err) {
@@ -344,81 +405,83 @@ async function onCallback(cb) {
   }
 }
 
+// ---------- Perintah Telegram ----------
 async function onMessage(m) {
   if (String(m.chat?.id) !== String(TELEGRAM_CHAT_ID)) return;
   const cmd = String(m.text ?? "").trim().split(/[ @]/)[0].toLowerCase();
 
   if (cmd === "/start" || cmd === "/help") {
     await sendTelegram(
-      `🤖 <b>Trading Bot Menu</b>\n\n` +
-      `📊 <b>Analisa & Sinyal</b>\n` +
-      `/analisa — analisa market M5 saat ini\n` +
-      `/tes_sinyal — kirim kartu sinyal\n\n` +
-      `🛡️ <b>Kontrol & Risiko</b>\n` +
-      `/pause — Hentikan sementara sinyal baru (mis. saat news)\n` +
-      `/resume — Aktifkan kembali sinyal otomatis\n` +
-      `/status — Cek status bot, posisi open & sisa kuota\n\n` +
-      `📒 <b>Jurnal & Evaluasi</b>\n` +
-      `/open — Lihat daftar posisi yang masih berjalan\n` +
-      `/rekap — Ringkasan win rate & performa jurnal\n` +
-      `/reset_jurnal — Arsipkan jurnal lama & mulai baru`,
+      `🤖 <b>Gemini Trading Bot Menu</b>\n\n` +
+        `📊 <b>Analisa & Sinyal</b>\n` +
+        `/analisa — Minta Gemini analisa market M5 saat ini\n` +
+        `/tes_sinyal — Simulasi kirim kartu sinyal\n\n` +
+        `🛡️ <b>Kontrol & Risiko</b>\n` +
+        `/pause — Hentikan sementara sinyal baru (mis. saat news)\n` +
+        `/resume — Aktifkan kembali sinyal otomatis\n` +
+        `/status — Cek status bot, posisi open & sisa kuota AI\n\n` +
+        `📒 <b>Jurnal & Evaluasi</b>\n` +
+        `/open — Lihat daftar posisi yang masih berjalan\n` +
+        `/rekap — Ringkasan win rate & total R\n` +
+        `/reset_jurnal — Arsipkan jurnal lama & mulai baru`,
       { parse_mode: "HTML" }
     );
-
   } else if (cmd === "/pause") {
     isPaused = true;
-    await sendTelegram("⏸️ <b>Bot di-PAUSE.</b> Sinyal baru tidak akan dikirim sampai Anda mengetik /resume.", { parse_mode: "HTML" });
-
+    await sendTelegram("⏸️ <b>Bot di-PAUSE.</b> Sinyal baru tidak akan dikirim sampai Anda mengetik /resume.", {
+      parse_mode: "HTML",
+    });
   } else if (cmd === "/resume") {
     isPaused = false;
     await sendTelegram("▶️ <b>Bot AKTIF kembali.</b> Pemantauan sinyal otomatis dilanjutkan.", { parse_mode: "HTML" });
-
   } else if (cmd === "/status") {
     const rows = readJournal();
     const openCount = rows.filter((r) => r.status === "OPEN").length;
     const wib = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
     await sendTelegram(
       `📡 <b>Status Bot (${wib} WIB)</b>\n` +
-      `• Kondisi: <b>${isPaused ? "⏸️ PAUSED" : "🟢 AKTIF"}</b>\n` +
-      `• Mode Eksekusi: <b>${executor.name.toUpperCase()}</b>\n` +
-      `• Model AI: <code>${GEMINI_MODEL}</code>\n` +
-      `• Kuota AI Hari Ini: <b>${dayCount} / ${MAX_PER_DAY}</b> request\n` +
-      `• Sinyal Open: <b>${openCount}</b>`,
+        `• Kondisi: <b>${isPaused ? "⏸️ PAUSED" : "🟢 AKTIF"}</b>\n` +
+        `• Mode Eksekusi: <b>${executor.name.toUpperCase()}</b>\n` +
+        `• Model AI: <code>${GEMINI_MODEL}</code>\n` +
+        `• Kuota AI Hari Ini: <b>${dayCount} / ${MAX_PER_DAY}</b> request\n` +
+        `• Sinyal Open: <b>${openCount}</b>`,
       { parse_mode: "HTML" }
     );
-
   } else if (cmd === "/open") {
     const openRows = readJournal().filter((r) => r.status === "OPEN");
     if (!openRows.length) {
       await sendTelegram("📭 Tidak ada posisi/sinyal yang berstatus OPEN saat ini.");
       return;
     }
-    const list = openRows.map((r, i) =>
-      `${i + 1}. <b>${r.side} ${r.pair}</b> (${r.tf}) [${r.aksi}]\n` +
-      `   Entry: ${r.entry} | SL: ${r.sl} | TP: ${r.tp1}`
-    ).join("\n\n");
+    const list = openRows
+      .map(
+        (r, i) =>
+          `${i + 1}. <b>${r.side} ${r.pair}</b> (${r.tf}) [${r.aksi}]\n` +
+          `   Entry: ${r.entry} | SL: ${r.sl} | TP: ${r.tp1}`
+      )
+      .join("\n\n");
     await sendTelegram(`📂 <b>Daftar Sinyal OPEN (${openRows.length}):</b>\n\n${list}`, { parse_mode: "HTML" });
-
   } else if (cmd === "/rekap") {
     await sendTelegram(recapText());
-
   } else if (cmd === "/reset_jurnal") {
     if (fs.existsSync(JOURNAL_FILE)) {
       const backupName = JOURNAL_FILE.replace(/\.csv$/, "") + `-arsip-${Date.now()}.csv`;
       fs.renameSync(JOURNAL_FILE, backupName);
     }
     writeJournal([]);
-    await sendTelegram("🗑️ <b>Jurnal berhasil di-reset!</b> Data lama telah diarsipkan di server.", { parse_mode: "HTML" });
-
+    await sendTelegram("🗑️ <b>Jurnal berhasil di-reset!</b> Data lama telah diarsipkan di server.", {
+      parse_mode: "HTML",
+    });
   } else if (cmd === "/analisa") {
-    await sendTelegram("🔍 Sedang menarik data candle terkini...");
+    await sendTelegram("🔍 Sedang menarik data candle terkini & meminta pandangan Gemini...");
     try {
       const job = jobs[0];
       const bars = await fetchClosedBars(job.spec, job.tf, process.env);
       const last = bars[bars.length - 1];
-      const summary = bars.slice(-20).map((b) =>
-        `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`
-      ).join("\n");
+      const summary = bars
+        .slice(-20)
+        .map((b) => `${new Date(b.t).toISOString().slice(11, 16)} O:${b.o} H:${b.h} L:${b.l} C:${b.c}`)
+        .join("\n");
 
       const prompt = `Berikan analisa scalping singkat (maksimal 5 poin) untuk ${job.pair} Timeframe ${tfName(job.tf)} berdasarkan 20 candle terakhir (UTC) berikut.
 Sebutkan: 1) Arah tren jangka pendek, 2) Level Support & Resistance terdekat, 3) Skenario entry terbaik saat ini, dan 4) Peringatan risiko. Gunakan bahasa Indonesia yang padat dan jelas tanpa tabel.
@@ -438,31 +501,37 @@ Harga terakhir: ${last.c}\n\nData Candle:\n${summary}`;
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon.";
-      await sendTelegram(`🧠 <b>Analisa Market ${job.pair} (${tfName(job.tf)})</b>\n\n${html(reply)}`, { parse_mode: "HTML" });
+      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Tidak ada respon dari Gemini.";
+      await sendTelegram(`🧠 <b>Analisa Market ${job.pair} (${tfName(job.tf)})</b>\n\n${html(reply)}`, {
+        parse_mode: "HTML",
+      });
     } catch (err) {
       await sendTelegram(`❌ Gagal melakukan analisa: ${html(err.message)}`, { parse_mode: "HTML" });
     }
-
   } else if (cmd === "/tes_sinyal") {
-    await sendTelegram("⏳ Menarik data live...");
-    const job = jobs[0];
-    const bars = await fetchClosedBars(job.spec, job.tf, process.env);
-    const last = bars[bars.length - 1];
-    const dummySignal = {
-      id: `TEST-${Date.now()}`,
-      time: last.t,
-      side: "BUY",
-      entry: last.c,
-      sl: Number((last.c - 3.0).toFixed(2)),
-      tp1: Number((last.c + 4.5).toFixed(2)),
-      rr1: 1.5,
-      reason: "Simulasi pullback EMA20 pada tren naik M5",
-    };
-    await handleSignal(job, dummySignal, bars);
+    await sendTelegram("⏳ Menarik data live & meminta analisa Gemini...");
+    try {
+      const job = jobs[0];
+      const bars = await fetchClosedBars(job.spec, job.tf, process.env);
+      const last = bars[bars.length - 1];
+      const dummySignal = {
+        id: `TEST-${Date.now()}`,
+        time: last.t,
+        side: "BUY",
+        entry: last.c,
+        sl: Number((last.c - 3.0).toFixed(2)),
+        tp1: Number((last.c + 4.5).toFixed(2)),
+        rr1: 1.5,
+        reason: "Simulasi pullback EMA20 pada tren naik M5",
+      };
+      await handleSignal(job, dummySignal, bars);
+    } catch (err) {
+      await sendTelegram(`❌ Gagal menjalankan tes sinyal: ${html(err.message)}`, { parse_mode: "HTML" });
+    }
   }
 }
 
+// ---------- Polling Telegram ----------
 async function pollTelegram() {
   let offset = 0;
   const startTime = Date.now();
@@ -474,10 +543,11 @@ async function pollTelegram() {
         try {
           if (u.callback_query) await onCallback(u.callback_query);
           else if (u.message) await onMessage(u.message);
-        } catch (err) { console.error("Error update Telegram:", err.message); }
+        } catch (err) {
+          console.error("Error update Telegram:", err.message);
+        }
       }
     } catch (err) {
-      // Abaikan log 409 pada 90 detik pertama saat container lama sedang dimatikan hosting
       if (err.message.includes("409") && Date.now() - startTime < 90_000) {
         await sleep(5000);
         continue;
@@ -487,6 +557,7 @@ async function pollTelegram() {
     }
   }
 }
+
 async function sweepExpired() {
   const now = Date.now();
   const expired = readJournal().filter((r) => r.aksi === "MENUNGGU" && now - Number(r.ts) > ttlMs);
@@ -496,11 +567,19 @@ async function sweepExpired() {
   }
 }
 
-const loadState = () => { try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch { return {}; } };
+// ---------- Pemrosesan Data & Jadwal ----------
+const loadState = () => {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+};
 const saveState = (s) => fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
 
 function marketClosed(d = new Date()) {
-  const day = d.getUTCDay(), h = d.getUTCHours();
+  const day = d.getUTCDay();
+  const h = d.getUTCHours();
   return day === 6 || (day === 0 && h < 21) || (day === 5 && h >= 22);
 }
 
@@ -525,7 +604,8 @@ async function processJob(job, attempt = 1) {
   }
 
   const prefix = `${job.pair}-${job.key}-${job.tf}`;
-  const events = job.run(bars)
+  const events = job
+    .run(bars)
     .map((e) => ({ ...e, id: e.id.replace("{PAIR}", prefix) }))
     .filter((e) => e.time > state[stateKey])
     .sort((a, b) => a.time - b.time);
@@ -534,8 +614,11 @@ async function processJob(job, attempt = 1) {
     if (e.type === "signal") await handleSignal(job, e, bars);
     else await handleResult(e);
   }
+
   state[stateKey] = lastBar;
   saveState(state);
+  const wib = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
+  console.log(`[${wib} WIB] Cek ${job.pair} ${job.label} | Candle: ${new Date(lastBar).toISOString()} | Event baru: ${events.length}`);
 }
 
 let queue = Promise.resolve();
@@ -544,8 +627,11 @@ function cycle(tf) {
     await sweepExpired().catch(() => {});
     if (marketClosed()) return;
     for (const job of jobs.filter((j) => j.tf === tf)) {
-      try { await processJob(job); }
-      catch (e) { console.error(`[${job.pair} ${job.label}] gagal: ${e.message}`); }
+      try {
+        await processJob(job);
+      } catch (e) {
+        console.error(`[${job.pair} ${job.label}] gagal: ${e.message}`);
+      }
       await sleep(8000);
     }
   });
@@ -556,18 +642,33 @@ function scheduleNext(tf) {
   const tfMs = tf * 60_000;
   const now = Date.now();
   const next = Math.floor(now / tfMs) * tfMs + tfMs + 10_000;
-  setTimeout(async () => { await cycle(tf); scheduleNext(tf); }, next - now);
+  setTimeout(async () => {
+    await cycle(tf);
+    scheduleNext(tf);
+  }, next - now);
 }
 
+// ---------- Main ----------
 if (process.argv.includes("--test")) {
-  await sendTelegram("✅ Tes Trading Bot: koneksi Telegram berhasil.");
+  await sendTelegram("✅ Tes Gemini Trading Bot: koneksi Telegram berhasil.");
   process.exit(0);
 }
 
+// Keep-alive HTTP server agar container hosting tidak sleep/mati
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end(`Bot Aktif | Status: ${isPaused ? "PAUSED" : "RUNNING"}`);
+  })
+  .listen(Number(PORT), () => console.log(`Keep-alive server berjalan di port ${PORT}`));
+
 const tfs = [...new Set(jobs.map((j) => j.tf))];
-console.log(`Trading Bot aktif (mode ${executor.name}).`);
+console.log(`Gemini Trading Bot aktif (mode ${executor.name}).`);
 await sendTelegram(`✅ <b>Bot Aktif</b> (Mode: ${executor.name.toUpperCase()})`, { parse_mode: "HTML" }).catch(() => {});
 
 pollTelegram();
 setInterval(() => sweepExpired().catch(() => {}), 60_000);
-for (const tf of tfs) { await cycle(tf); scheduleNext(tf); }
+for (const tf of tfs) {
+  await cycle(tf);
+  scheduleNext(tf);
+}

@@ -4,7 +4,7 @@ export const SCALP_DEFAULTS = {
   minGapAtr: 0.3,    // jarak EMA20-EMA50 minimal (x ATR), menyaring pasar sideways
   pullbackBars: 3,   // pullback boleh terjadi di candle ini atau 3 candle sebelumnya
   slLookback: 5,     // SL di luar low/high N candle terakhir
-  slBufAtr: 0.1,
+  slBufAtr: 0.3,
   minRiskAtr: 0.5,   // jarak SL minimal (x ATR), terlalu sempit = mudah kena noise
   maxRiskAtr: 2.5,   // jarak SL maksimal (x ATR), terlalu lebar = bukan scalping
   rr: 1.5,

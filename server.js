@@ -213,7 +213,7 @@ async function handleSignal(job, e, bars) {
         reason = ai.reason || reason;
       } else {
         // Sinyal tetap lanjut dikirim, tetapi disisipkan alert peringatan AI
-        aiAlert = `⚠️ <b>ALERT GEMINI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
+        aiAlert = `⚠️ <b>ALERT AI (Setup Rawan):</b> <i>${html(ai.reason)}</i>`;
         console.log(`[Gemini Alert] Sinyal ${e.id} tetap dikirim dengan peringatan: ${ai.reason}`);
       }
     } catch (err) {

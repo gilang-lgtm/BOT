@@ -1,15 +1,17 @@
 // Strategi Hybrid: EMA 20 Trend Filter + Institutional Liquidity (Sweep + Displacement + MSS)
+// Versi teroptimasi (lebih responsif untuk XAU/USD M5)
+
 export const HYBRID_DEFAULTS = {
   emaPeriod: 20,
-  swingLookback: 15,      // Diturunkan dari 20 agar swing likuiditas jangka pendek cepat terbaca
-  sweepWindow: 6,         // Dinaikkan dari 5 agar jendela pantulan setelah sweep lebih luas
-  dispAtrMult: 0.85,      // Diturunkan dari 1.3 agar dorongan momentum normal M5 tetap lolos
-  slBufAtr: 0.15,
-  minRiskAtr: 0.3,        // Diturunkan dari 0.4 agar SL scalping ketat tetap valid
-  maxRiskAtr: 4.0,
-  rr: 1.5,                // Diturunkan dari 2.0 ke 1.5 agar TP lebih cepat tercapai & slot sinyal cepat terbuka
-  cooldown: 2,            // Diturunkan dari 4 (jeda antar sinyal cukup 10 menit)
-  holdMax: 24,            // Diturunkan dari 48 (maksimal 2 jam pantau per sinyal)
+  swingLookback: 15,      // Jendela mencari Swing High/Low likuiditas jangka pendek
+  sweepWindow: 6,         // Jendela pantulan maksimal N candle setelah liquidity sweep
+  dispAtrMult: 0.85,      // Minimal ukuran body candle displacement (x ATR14)
+  slBufAtr: 0.15,         // Buffer SL di luar ekor sweep (x ATR14)
+  minRiskAtr: 0.3,        // Filter SL terlalu sempit (x ATR14)
+  maxRiskAtr: 4.0,        // Filter SL terlalu lebar (x ATR14)
+  rr: 1.5,                // Risk Reward 1:1.5 agar TP lebih realistis & cepat tercapai di M5
+  cooldown: 2,            // Jeda minimal antar sinyal (2 bar M5 = 10 menit)
+  holdMax: 24,            // Maksimal durasi pantau hasil (24 bar M5 = 2 jam)
 };
 
 function ema(values, period) {
@@ -19,7 +21,10 @@ function ema(values, period) {
   for (let i = 0; i < values.length; i++) {
     if (i < period) {
       sum += values[i];
-      if (i === period - 1) { cur = sum / period; out[i] = cur; }
+      if (i === period - 1) {
+        cur = sum / period;
+        out[i] = cur;
+      }
     } else {
       cur = values[i] * k + cur * (1 - k);
       out[i] = cur;
@@ -29,12 +34,20 @@ function ema(values, period) {
 }
 
 function atr14(H, L, C) {
-  const n = H.length, out = new Array(n).fill(NaN);
+  const n = H.length;
+  const out = new Array(n).fill(NaN);
   let sum = 0, cur = NaN;
   for (let i = 0; i < n; i++) {
-    const tr = i === 0 ? H[i] - L[i] : Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1]));
-    if (i < 14) { sum += tr; if (i === 13) cur = sum / 14; }
-    else cur = (cur * 13 + tr) / 14;
+    const tr =
+      i === 0
+        ? H[i] - L[i]
+        : Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1]));
+    if (i < 14) {
+      sum += tr;
+      if (i === 13) cur = sum / 14;
+    } else {
+      cur = (cur * 13 + tr) / 14;
+    }
     if (i >= 13) out[i] = cur;
   }
   return out;
@@ -57,6 +70,7 @@ export function runHybrid(bars, cfg = {}) {
   let lastSig = -1e9;
 
   for (let i = P.swingLookback + P.sweepWindow; i < n; i++) {
+    // 1. Pantau hasil sinyal aktif (SL dicek lebih dulu)
     if (act && i > act.bar) {
       const hitSl = act.side === 1 ? L[i] <= act.sl : H[i] >= act.sl;
       const hitTp = act.side === 1 ? H[i] >= act.tp : L[i] <= act.tp;
@@ -72,19 +86,19 @@ export function runHybrid(bars, cfg = {}) {
 
     const a = atr[i];
     const emaNow = e20[i];
-    const emaPrev = e20[i - 3];
-    if ([a, emaNow, emaPrev].some(Number.isNaN)) continue;
+    if ([a, emaNow].some(Number.isNaN)) continue;
 
+    // 2. Cek Displacement pada candle saat ini (i)
     const body = Math.abs(C[i] - O[i]);
     const range = H[i] - L[i];
-    const isDisplacement = body >= P.dispAtrMult * a && range > 0 && body / range >= 0.6;
+    const isDisplacement = body >= P.dispAtrMult * a && range > 0 && body / range >= 0.5;
     if (!isDisplacement) continue;
 
     const bullCandle = C[i] > O[i];
     const bearCandle = C[i] < O[i];
 
-    // Skenario BUY: Sweep Low -> Displacement + MSS tembus High -> Close di atas EMA20
-    if (bullCandle && C[i] > emaNow && emaNow >= emaPrev) {
+    // 3. Skenario BUY: Sweep Low -> Displacement + MSS tembus High -> Close/Reclaim di atas EMA20
+    if (bullCandle && C[i] > emaNow) {
       const sweepStart = i - P.sweepWindow;
       const poolStart = sweepStart - P.swingLookback;
       const liquidityLow = Math.min(...L.slice(poolStart, sweepStart));
@@ -131,8 +145,8 @@ export function runHybrid(bars, cfg = {}) {
       }
     }
 
-    // Skenario SELL: Sweep High -> Displacement + MSS tembus Low -> Close di bawah EMA20
-    if (!act && bearCandle && C[i] < emaNow && emaNow <= emaPrev) {
+    // 4. Skenario SELL: Sweep High -> Displacement + MSS tembus Low -> Close/Reclaim di bawah EMA20
+    if (!act && bearCandle && C[i] < emaNow) {
       const sweepStart = i - P.sweepWindow;
       const poolStart = sweepStart - P.swingLookback;
       const liquidityHigh = Math.max(...H.slice(poolStart, sweepStart));

@@ -309,14 +309,45 @@ function summarize(rows) {
   };
 }
 
+// Konversi selisih harga ke pips (XAU/USD: 1 pip = 0.10 | Forex mayor: 1 pip = 0.0001)
+function calcPips(pair, priceA, priceB) {
+  const diff = Math.abs(Number(priceA) - Number(priceB));
+  if (Number.isNaN(diff)) return 0;
+  const p = String(pair).toUpperCase();
+  const mult = p.includes("XAU") || p.includes("GOLD") ? 10 : p.includes("JPY") ? 100 : 10000;
+  return Math.round(diff * mult * 10) / 10;
+}
+
 function recapText() {
   const rows = readJournal();
   const line = (title, s) =>
     `${title}: ${s.closed} selesai | menang ${s.wins} | kalah ${s.losses} | win rate ${s.winRate.toFixed(0)}% | total ${s.totalR >= 0 ? "+" : ""}${s.totalR.toFixed(2)}R | terbuka ${s.open}`;
-  return [
+
+  const summaryHeader = [
     line("Order dieksekusi AI", summarize(rows.filter((r) => r.aksi === "DIAMBIL"))),
     line("Semua kandidat", summarize(rows)),
   ].join("\n");
+
+  // Ambil 15 transaksi terbaru yang dieksekusi AI (atau semua kandidat jika belum ada)
+  const executed = rows.filter((r) => r.aksi === "DIAMBIL").slice(-15);
+  if (!executed.length) return summaryHeader;
+
+  const details = executed.map((r, idx) => {
+    const slPips = calcPips(r.pair, r.entry, r.sl);
+    const tpPips = calcPips(r.pair, r.entry, r.tp1);
+    const statusIcon =
+      r.status === "TP1" ? "✅" :
+      r.status === "SL" ? "❌" :
+      r.status === "EXPIRED" ? "🛡️" : "⏳";
+    const rText = r.hasil_r ? ` (${Number(r.hasil_r) >= 0 ? "+" : ""}${r.hasil_r}R)` : "";
+
+    return (
+      `${idx + 1}. ${statusIcon} ${r.side} ${r.pair} [${r.status}${rText}]\n` +
+      `   Entry: ${r.entry} | SL: ${r.sl} (${slPips} pips) | TP: ${r.tp1} (${tpPips} pips)`
+    );
+  });
+
+  return `${summaryHeader}\n\n📋 Detail Eksekusi AI (Terbaru):\n${details.join("\n")}`;
 }
 
 // ---------- Penanganan Sinyal Baru (Dengan Auto-Execute AI) ----------

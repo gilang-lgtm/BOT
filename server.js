@@ -15,7 +15,7 @@ const {
   SCALP_TF = "5",
   EXECUTION = "paper",
   AUTO_EXECUTE = "true",      // AI langsung mengeksekusi jika skor >= MIN_AI_SCORE
-  MIN_AI_SCORE = "50",        // Ambang skor diturunkan agar AI lebih sering transaksi
+  MIN_AI_SCORE = "50",        
   SIGNAL_TTL_MIN = "10",
   GEMINI_API_KEY,
   GEMINI_MODEL = "gemini-3.1-flash-lite-preview",
